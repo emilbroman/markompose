@@ -1,0 +1,102 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>markompose playground</title>
+    <link rel="stylesheet" href="/dev/style.css" />
+    <script type="module" src="/dev/main.ts"></script>
+  </head>
+  <body>
+    <header>
+      <h1>markompose</h1>
+      <p>Dev playground. Each scenario mounts a composer in a different context.</p>
+    </header>
+
+    <main>
+      <section>
+        <h2>Basic</h2>
+        <markompose-composer placeholder="Write some Markdown…"></markompose-composer>
+      </section>
+
+      <section>
+        <h2>Prefilled (default value from text content)</h2>
+        <markompose-composer>
+# Hello, markompose
+
+This is **bold**, this is *italic*, and this is `code`.
+
+- A list item
+- Another one with a [link](https://example.com)
+
+> A quote
+</markompose-composer>
+      </section>
+
+      <section>
+        <h2>Fixed height, scrolling</h2>
+        <markompose-composer class="fixed" id="long"></markompose-composer>
+      </section>
+
+      <section>
+        <h2>Auto-growing, full width</h2>
+        <markompose-composer class="full" placeholder="Grows with content"></markompose-composer>
+      </section>
+
+      <section>
+        <h2>Side by side with a native textarea</h2>
+        <div class="row">
+          <markompose-composer>Same text in both. Compare behaviour.</markompose-composer>
+          <textarea>Same text in both. Compare behaviour.</textarea>
+        </div>
+      </section>
+
+      <section>
+        <h2>Chat-style composer (flex footer)</h2>
+        <div class="chat">
+          <div class="messages"><p>Messages would go here.</p></div>
+          <div class="chat-input">
+            <markompose-composer placeholder="Message…"></markompose-composer>
+            <button type="button">Send</button>
+          </div>
+        </div>
+      </section>
+
+      <section>
+        <h2>Inside a form</h2>
+        <form id="form">
+          <fieldset id="fieldset">
+            <legend>Post</legend>
+            <label>Body <markompose-composer name="body">Default body</markompose-composer></label>
+          </fieldset>
+          <div class="actions">
+            <button type="submit">Submit</button>
+            <button type="reset">Reset</button>
+            <label><input type="checkbox" id="toggle-fieldset" /> Disable fieldset</label>
+          </div>
+          <pre id="form-output"></pre>
+        </form>
+      </section>
+
+      <section>
+        <h2>Disabled &amp; read-only</h2>
+        <div class="row">
+          <markompose-composer disabled>Disabled **content**</markompose-composer>
+          <markompose-composer readonly>Read-only **content**</markompose-composer>
+        </div>
+      </section>
+
+      <section>
+        <h2>Programmatic API</h2>
+        <markompose-composer id="api">Select some of this text, then press the buttons.</markompose-composer>
+        <div class="actions">
+          <button type="button" data-action="read">Read value + selection</button>
+          <button type="button" data-action="select-all">select()</button>
+          <button type="button" data-action="set">Set value</button>
+          <button type="button" data-action="select-word">setSelectionRange(7, 11)</button>
+        </div>
+        <pre id="api-output"></pre>
+      </section>
+    </main>
+  </body>
+</html>

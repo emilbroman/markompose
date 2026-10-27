@@ -1,0 +1,28 @@
+{
+  "name": "markompose",
+  "version": "0.0.0",
+  "description": "A Markdown composer element that renders WYSIWYG while editing plain Markdown source.",
+  "type": "module",
+  "files": [
+    "dist"
+  ],
+  "main": "./dist/markompose.js",
+  "module": "./dist/markompose.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/markompose.js"
+    }
+  },
+  "scripts": {
+    "dev": "vite",
+    "build": "rm -rf dist && tsc -p tsconfig.build.json && vite build",
+    "typecheck": "tsc --noEmit",
+    "preview": "vite preview"
+  },
+  "devDependencies": {
+    "typescript": "^7.0.2",
+    "vite": "^8.3.5"
+  }
+}
