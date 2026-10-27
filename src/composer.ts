@@ -1,5 +1,17 @@
 import { parseInline, type InlineSpan } from "./markdown";
 
+const SPAN_TAGS: Record<InlineSpan["type"], string> = {
+  bold: "strong",
+  italic: "em",
+};
+
+function syntax(text: string): HTMLElement {
+  const element = document.createElement("span");
+  element.className = "md-syntax";
+  element.textContent = text;
+  return element;
+}
+
 const graphemes = new Intl.Segmenter(undefined, { granularity: "grapheme" });
 
 /** The offset of the grapheme boundary before `offset`. */
@@ -347,12 +359,18 @@ export class Composer extends HTMLElement {
    */
   #snapOutOfHidden([start, end]: [number, number]): [number, number] {
     if (start !== end) return [start, end];
-    for (const { span, element } of this.#spans) {
-      if (element.classList.contains("active")) continue;
-      if (start === span.end - span.close) return [span.end, span.end];
-      if (start === span.start + span.open) return [span.start, span.start];
+    // Repeat until stable: nested spans, like `***x***`, stack their tokens.
+    let caret = start;
+    for (let moved = true; moved; ) {
+      moved = false;
+      for (const { span, element } of this.#spans) {
+        if (element.classList.contains("active")) continue;
+        const next =
+          caret === span.end - span.close ? span.end : caret === span.start + span.open ? span.start : caret;
+        if (next !== caret) [caret, moved] = [next, true];
+      }
     }
-    return [start, end];
+    return [caret, caret];
   }
 
   #isFocused(): boolean {
@@ -382,30 +400,8 @@ export class Composer extends HTMLElement {
   #render(selection: [number, number] | null): void {
     const source = this.#value;
     const fragment = document.createDocumentFragment();
-    const syntax = (text: string) => {
-      const element = document.createElement("span");
-      element.className = "md-syntax";
-      element.textContent = text;
-      return element;
-    };
-
     this.#spans = [];
-    let cursor = 0;
-    for (const span of parseInline(source)) {
-      if (span.start < cursor) continue;
-      fragment.append(source.slice(cursor, span.start));
-      const element = document.createElement("strong");
-      element.className = "md-span md-bold";
-      element.append(
-        syntax(source.slice(span.start, span.start + span.open)),
-        source.slice(span.start + span.open, span.end - span.close),
-        syntax(source.slice(span.end - span.close, span.end)),
-      );
-      fragment.append(element);
-      this.#spans.push({ span, element });
-      cursor = span.end;
-    }
-    fragment.append(source.slice(cursor));
+    this.#renderSpans(fragment, 0, source.length, parseInline(source));
     // A trailing newline doesn't produce a line box on its own.
     if (source.endsWith("\n")) {
       const br = document.createElement("br");
@@ -418,12 +414,53 @@ export class Composer extends HTMLElement {
     this.#updateActive(selection);
   }
 
-  /** Marks spans touched by the selection (edges inclusive) as active. */
-  #updateActive(selection: [number, number] | null): void {
-    for (const { span, element } of this.#spans) {
-      const active = selection !== null && selection[0] <= span.end && selection[1] >= span.start;
-      element.classList.toggle("active", active);
+  /**
+   * Renders source[from, to) into parent. `spans` lie within that range,
+   * properly nested, ordered by start with outer spans first.
+   */
+  #renderSpans(parent: ParentNode, from: number, to: number, spans: InlineSpan[]): void {
+    const source = this.#value;
+    let cursor = from;
+    for (let i = 0; i < spans.length; ) {
+      const span = spans[i]!;
+      // Everything up to the first span starting at or after our end is nested.
+      let j = i + 1;
+      while (j < spans.length && spans[j]!.start < span.end) j++;
+
+      parent.append(source.slice(cursor, span.start));
+      const element = document.createElement(SPAN_TAGS[span.type]);
+      element.className = `md-span md-${span.type}`;
+      element.append(syntax(source.slice(span.start, span.start + span.open)));
+      this.#renderSpans(element, span.start + span.open, span.end - span.close, spans.slice(i + 1, j));
+      element.append(syntax(source.slice(span.end - span.close, span.end)));
+      parent.append(element);
+      this.#spans.push({ span, element });
+
+      cursor = span.end;
+      i = j;
     }
+    parent.append(source.slice(cursor, to));
+  }
+
+  /**
+   * Marks spans touched by the selection (edges inclusive) as active, along
+   * with spans whose tokens run straight into an active span's tokens, so
+   * that e.g. `***` is shown whole rather than as a lone `*`.
+   */
+  #updateActive(selection: [number, number] | null): void {
+    const active = new Set(
+      this.#spans.filter(({ span }) => selection !== null && selection[0] <= span.end && selection[1] >= span.start),
+    );
+    const abuts = (a: InlineSpan, b: InlineSpan) =>
+      a.start + a.open === b.start || a.end - a.close === b.end || b.start + b.open === a.start || b.end - b.close === a.end;
+    for (let grew = active.size > 0; grew; ) {
+      grew = false;
+      for (const entry of this.#spans) {
+        if (active.has(entry)) continue;
+        if ([...active].some(({ span }) => abuts(span, entry.span))) [grew] = [true, active.add(entry)];
+      }
+    }
+    for (const entry of this.#spans) entry.element.classList.toggle("active", active.has(entry));
   }
 
   /** Returns the current selection as source offsets, if it is inside us. */
