@@ -6,6 +6,8 @@ function tagFor(span: Span): string {
       return "strong";
     case "italic":
       return "em";
+    case "strikethrough":
+      return "del";
     case "code":
       return "code";
     case "link":

@@ -12,7 +12,7 @@ interface SpanBase {
 }
 
 export interface InlineSpan extends SpanBase {
-  type: "bold" | "italic" | "code";
+  type: "bold" | "italic" | "strikethrough" | "code";
 }
 
 /** An inline link, `[text](href "title")`. The close token is `](...)`. */
@@ -46,7 +46,7 @@ export interface HeadingSpan extends SpanBase {
 }
 
 interface Delimiter {
-  char: "*" | "_";
+  char: "*" | "_" | "~";
   /** Offset of the run in the source. */
   pos: number;
   /** Original run length. */
@@ -319,7 +319,10 @@ function runLength(source: string, i: number, to: number): number {
   return end - i;
 }
 
-/** https://spec.commonmark.org/0.31.2/#emphasis-and-strong-emphasis */
+/**
+ * https://spec.commonmark.org/0.31.2/#emphasis-and-strong-emphasis, plus GFM
+ * strikethrough, which uses the same delimiter runs.
+ */
 /** `opaque` are sorted ranges, like code spans, whose content is skipped. */
 function parseEmphasis(source: string, from: number, to: number, opaque: Range[], spans: Span[]): void {
   const delimiters = scanDelimiters(source, from, to, opaque);
@@ -331,14 +334,17 @@ function parseEmphasis(source: string, from: number, to: number, opaque: Range[]
     while (closer.remaining > 0) {
       const opener = findOpener(delimiters, c);
       if (!opener) break;
-      const use = opener.remaining >= 2 && closer.remaining >= 2 ? 2 : 1;
+      // Tildes pair whole runs of equal length; asterisks and underscores take
+      // two for bold where both runs have them, else one for italic.
+      const use = closer.char === "~" ? closer.remaining : opener.remaining >= 2 && closer.remaining >= 2 ? 2 : 1;
 
       opener.remaining -= use;
       const start = opener.pos + opener.closeConsumed + opener.remaining;
       const end = closer.pos + closer.closeConsumed + use;
       closer.closeConsumed += use;
       closer.remaining -= use;
-      spans.push({ type: use === 2 ? "bold" : "italic", start, end, open: use, close: use });
+      const type = closer.char === "~" ? "strikethrough" : use === 2 ? "bold" : "italic";
+      spans.push({ type, start, end, open: use, close: use });
 
       // Delimiters between the pair can no longer match anything.
       for (let i = delimiters.indexOf(opener) + 1; i < c; i++) delimiters[i]!.remaining = 0;
@@ -351,6 +357,10 @@ function findOpener(delimiters: Delimiter[], c: number): Delimiter | null {
   for (let o = c - 1; o >= 0; o--) {
     const opener = delimiters[o]!;
     if (opener.char !== closer.char || !opener.canOpen || opener.remaining === 0) continue;
+    if (opener.char === "~") {
+      if (opener.remaining === closer.remaining) return opener;
+      continue;
+    }
     // The "rule of 3": a run that can both open and close can't pair with one
     // whose lengths sum to a multiple of 3, unless both are multiples of 3.
     if (
@@ -380,9 +390,14 @@ function scanDelimiters(source: string, from: number, to: number, opaque: Range[
       i++; // Skip the escaped character.
       continue;
     }
-    if (char !== "*" && char !== "_") continue;
+    if (char !== "*" && char !== "_" && char !== "~") continue;
 
     const end = i + runLength(source, i, to);
+    // https://github.github.com/gfm/#strikethrough-extension-: one or two.
+    if (char === "~" && end - i > 2) {
+      i = end - 1;
+      continue;
+    }
     // Line/paragraph boundaries count as whitespace.
     const before = i > from ? source[i - 1]! : " ";
     const after = end < to ? source[end]! : " ";
@@ -400,8 +415,8 @@ function scanDelimiters(source: string, from: number, to: number, opaque: Range[
       length,
       remaining: length,
       closeConsumed: 0,
-      canOpen: char === "*" ? leftFlanking : leftFlanking && (!rightFlanking || beforePunct),
-      canClose: char === "*" ? rightFlanking : rightFlanking && (!leftFlanking || afterPunct),
+      canOpen: char === "_" ? leftFlanking && (!rightFlanking || beforePunct) : leftFlanking,
+      canClose: char === "_" ? rightFlanking && (!leftFlanking || afterPunct) : rightFlanking,
     });
     i = end - 1;
   }
