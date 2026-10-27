@@ -1,4 +1,4 @@
-import { parse, type Span } from "./markdown";
+import { parse, type LinkSpan, type Span } from "./markdown";
 
 function tagFor(span: Span): string {
   switch (span.type) {
@@ -8,9 +8,21 @@ function tagFor(span: Span): string {
       return "em";
     case "code":
       return "code";
+    case "link":
+      return "a";
     case "heading":
       return `h${span.level}`;
   }
+}
+
+// Schemes that run code rather than navigate.
+const UNSAFE_HREF = /^\s*(?:javascript|vbscript|data):/i;
+
+function linkify(anchor: HTMLAnchorElement, span: LinkSpan): void {
+  if (!UNSAFE_HREF.test(span.href)) anchor.setAttribute("href", span.href);
+  if (span.title !== undefined) anchor.title = span.title;
+  anchor.target = "_blank";
+  anchor.rel = "noopener noreferrer";
 }
 
 function syntax(text: string): HTMLElement {
@@ -75,6 +87,14 @@ const STYLES = `
   margin: 0.25em 0;
   line-height: 1.25;
 }
+.md-link {
+  color: LinkText;
+  text-decoration: underline;
+}
+/* While editing, links are followed with Cmd/Ctrl + click. */
+.editor.follow-links .md-link[href] {
+  cursor: pointer;
+}
 .md-code {
   font-family: ui-monospace, monospace;
   font-size: 0.9em;
@@ -137,7 +157,9 @@ export class Composer extends HTMLElement {
     this.#editor.addEventListener("beforeinput", this.#onBeforeInput);
     this.#editor.addEventListener("input", this.#onInput);
     this.#editor.addEventListener("compositionend", this.#onInput);
-    this.#editor.addEventListener("pointerdown", () => (this.#pointerDown = true));
+    this.#editor.addEventListener("pointerdown", this.#onPointerDown);
+    this.#editor.addEventListener("click", this.#onClick);
+    this.#editor.addEventListener("pointermove", this.#onModifierChange);
     this.#editor.addEventListener("focus", () => (this.#valueAtFocus = this.#value));
     this.#editor.addEventListener("blur", () => {
       this.#updateActive(null);
@@ -153,12 +175,16 @@ export class Composer extends HTMLElement {
     document.addEventListener("selectionchange", this.#onSelectionChange);
     document.addEventListener("pointerup", this.#onPointerUp);
     document.addEventListener("pointercancel", this.#onPointerUp);
+    document.addEventListener("keydown", this.#onModifierChange);
+    document.addEventListener("keyup", this.#onModifierChange);
   }
 
   disconnectedCallback(): void {
     document.removeEventListener("selectionchange", this.#onSelectionChange);
     document.removeEventListener("pointerup", this.#onPointerUp);
     document.removeEventListener("pointercancel", this.#onPointerUp);
+    document.removeEventListener("keydown", this.#onModifierChange);
+    document.removeEventListener("keyup", this.#onModifierChange);
   }
 
   attributeChangedCallback(name: string, _old: string | null, next: string | null): void {
@@ -430,6 +456,34 @@ export class Composer extends HTMLElement {
     this.#updateActive(selection);
   };
 
+  #onPointerDown = (event: PointerEvent): void => {
+    // Following a link shouldn't move the caret, or reveal the link's syntax.
+    if (this.#linkToFollow(event)) return event.preventDefault();
+    this.#pointerDown = true;
+  };
+
+  #onClick = (event: MouseEvent): void => {
+    const link = this.#linkAt(event);
+    if (!link || !this.#isEditable()) return; // Read-only links work as usual.
+    event.preventDefault();
+    if (this.#linkToFollow(event)) window.open(link.href, "_blank", "noopener,noreferrer");
+  };
+
+  /** While editing, a link is only followed with Cmd/Ctrl + click. */
+  #linkToFollow(event: MouseEvent): HTMLAnchorElement | null {
+    const link = this.#linkAt(event);
+    return link && this.#isEditable() && (event.metaKey || event.ctrlKey) ? link : null;
+  }
+
+  #linkAt(event: Event): HTMLAnchorElement | null {
+    const target = event.composedPath()[0];
+    return target instanceof Element ? target.closest<HTMLAnchorElement>("a.md-link[href]") : null;
+  }
+
+  #onModifierChange = (event: KeyboardEvent | PointerEvent): void => {
+    this.#editor.classList.toggle("follow-links", this.#isEditable() && (event.metaKey || event.ctrlKey));
+  };
+
   #onPointerUp = (): void => {
     if (!this.#pointerDown) return;
     this.#pointerDown = false;
@@ -543,6 +597,7 @@ export class Composer extends HTMLElement {
       parent.append(source.slice(cursor, span.start));
       const element = document.createElement(tagFor(span));
       element.className = `md-span md-${span.type}`;
+      if (span.type === "link") linkify(element as HTMLAnchorElement, span);
       element.append(syntax(source.slice(span.start, span.start + span.open)));
       this.#renderSpans(element, span.start + span.open, span.end - span.close, spans.slice(i + 1, j));
       element.append(syntax(source.slice(span.end - span.close, span.end)));

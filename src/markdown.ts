@@ -2,7 +2,7 @@
  * A span of Markdown, in source offsets. `start`/`end` cover the whole span
  * including its syntax tokens; `open`/`close` are the token lengths.
  */
-export type Span = InlineSpan | HeadingSpan;
+export type Span = InlineSpan | LinkSpan | HeadingSpan;
 
 interface SpanBase {
   start: number;
@@ -13,6 +13,13 @@ interface SpanBase {
 
 export interface InlineSpan extends SpanBase {
   type: "bold" | "italic" | "code";
+}
+
+/** An inline link, `[text](href "title")`. The close token is `](...)`. */
+export interface LinkSpan extends SpanBase {
+  type: "link";
+  href: string;
+  title?: string;
 }
 
 /** An ATX heading. It ends at the end of its line, before the newline. */
@@ -80,10 +87,134 @@ export function parse(source: string): Span[] {
 
 /** Finds inline spans in source[from, to). */
 function parseInlines(source: string, from: number, to: number, spans: Span[]): void {
-  // Code spans bind tighter than emphasis: delimiters inside them are literal.
+  // Precedence: code spans, then link brackets, then emphasis. Brackets and
+  // delimiters inside code spans are literal, and emphasis can't cross a
+  // link's boundary, though it can wrap a whole link.
   const code = scanCodeSpans(source, from, to);
-  spans.push(...code);
-  parseEmphasis(source, from, to, code, spans);
+  const links = scanLinks(source, from, to, code);
+  spans.push(...code, ...links);
+
+  const inside = (outer: Range) => (inner: Range) => inner.start >= outer.start && inner.end <= outer.end;
+  const opaque = [...code.filter((c) => !links.some((link) => inside(link)(c))), ...links];
+  parseEmphasis(source, from, to, opaque.sort((a, b) => a.start - b.start), spans);
+  for (const link of links) {
+    const text: Range = { start: link.start + link.open, end: link.end - link.close };
+    parseEmphasis(source, text.start, text.end, code.filter(inside(text)), spans);
+  }
+}
+
+interface Range {
+  start: number;
+  end: number;
+}
+
+/** https://spec.commonmark.org/0.31.2/#links (inline links only) */
+function scanLinks(source: string, from: number, to: number, code: Range[]): LinkSpan[] {
+  const links: LinkSpan[] = [];
+  const openers: { pos: number; active: boolean }[] = [];
+  let nextCode = 0;
+  for (let i = from; i < to; i++) {
+    const span = code[nextCode];
+    if (span && i === span.start) {
+      i = span.end - 1;
+      nextCode++;
+      continue;
+    }
+    const char = source[i];
+    if (char === "\\") {
+      i++;
+      continue;
+    }
+    if (char === "[") {
+      openers.push({ pos: i, active: true });
+      continue;
+    }
+    if (char !== "]") continue;
+
+    // The nearest opener is used up either way.
+    const opener = openers.pop();
+    if (!opener?.active) continue;
+    const destination = source[i + 1] === "(" ? parseDestination(source, i + 1, to) : null;
+    if (!destination) continue;
+
+    links.push({
+      type: "link",
+      start: opener.pos,
+      end: destination.end,
+      open: 1,
+      close: destination.end - i,
+      href: destination.href,
+      ...(destination.title !== undefined && { title: destination.title }),
+    });
+    // Links can't contain links.
+    for (const outer of openers) outer.active = false;
+    i = destination.end - 1;
+  }
+  return links.sort((a, b) => a.start - b.start);
+}
+
+/**
+ * Parses `(href "title")` starting at the `(`.
+ * https://spec.commonmark.org/0.31.2/#link-destination
+ */
+function parseDestination(
+  source: string,
+  paren: number,
+  to: number,
+): { end: number; href: string; title?: string } | null {
+  const skipSpace = (i: number) => {
+    while (i < to && WHITESPACE.test(source[i]!)) i++;
+    return i;
+  };
+
+  let i = skipSpace(paren + 1);
+  let href: string;
+  if (source[i] === "<") {
+    let j = i + 1;
+    for (; j < to && source[j] !== ">"; j++) {
+      if (source[j] === "\n" || source[j] === "<") return null;
+      if (source[j] === "\\") j++;
+    }
+    if (j >= to) return null;
+    href = source.slice(i + 1, j);
+    i = j + 1;
+  } else {
+    let j = i;
+    let depth = 0;
+    for (; j < to; j++) {
+      const char = source[j]!;
+      if (char === "\\") {
+        j++;
+        continue;
+      }
+      if (WHITESPACE.test(char) || char < " ") break;
+      if (char === "(") depth++;
+      if (char === ")" && depth-- === 0) break;
+    }
+    if (depth > 0) return null;
+    href = source.slice(i, j);
+    i = j;
+  }
+
+  let title: string | undefined;
+  const afterHref = i;
+  i = skipSpace(i);
+  const quote = source[i];
+  if (i > afterHref && (quote === '"' || quote === "'" || quote === "(")) {
+    const closer = quote === "(" ? ")" : quote;
+    let j = i + 1;
+    for (; j < to && source[j] !== closer; j++) if (source[j] === "\\") j++;
+    if (j >= to) return null;
+    title = unescape(source.slice(i + 1, j));
+    i = skipSpace(j + 1);
+  }
+  if (source[i] !== ")") return null;
+  return { end: i + 1, href: unescape(href), ...(title !== undefined && { title }) };
+}
+
+/** Removes backslash escapes. https://spec.commonmark.org/0.31.2/#backslash-escapes */
+function unescape(text: string): string {
+  return text.replace(/\\([!-/:-@[-`{-~])/g, "$1");
 }
 
 /** https://spec.commonmark.org/0.31.2/#code-spans */
@@ -125,8 +256,9 @@ function runLength(source: string, i: number, to: number): number {
 }
 
 /** https://spec.commonmark.org/0.31.2/#emphasis-and-strong-emphasis */
-function parseEmphasis(source: string, from: number, to: number, code: InlineSpan[], spans: Span[]): void {
-  const delimiters = scanDelimiters(source, from, to, code);
+/** `opaque` are sorted ranges, like code spans, whose content is skipped. */
+function parseEmphasis(source: string, from: number, to: number, opaque: Range[], spans: Span[]): void {
+  const delimiters = scanDelimiters(source, from, to, opaque);
 
   for (let c = 0; c < delimiters.length; c++) {
     const closer = delimiters[c]!;
@@ -169,14 +301,14 @@ function findOpener(delimiters: Delimiter[], c: number): Delimiter | null {
   return null;
 }
 
-function scanDelimiters(source: string, from: number, to: number, code: InlineSpan[]): Delimiter[] {
+function scanDelimiters(source: string, from: number, to: number, opaque: Range[]): Delimiter[] {
   const delimiters: Delimiter[] = [];
-  let nextCode = 0;
+  let next = 0;
   for (let i = from; i < to; i++) {
-    const span = code[nextCode];
-    if (span && i === span.start) {
-      i = span.end - 1;
-      nextCode++;
+    const range = opaque[next];
+    if (range && i === range.start) {
+      i = range.end - 1;
+      next++;
       continue;
     }
     const char = source[i]!;
