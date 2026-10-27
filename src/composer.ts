@@ -106,6 +106,9 @@ export class Composer extends HTMLElement {
   #dirty = false;
   #formDisabled = false;
   #spans: { span: InlineSpan; element: HTMLElement }[] = [];
+  /** Where the last collapsed selection was, and where it snapped to. */
+  #anchorSnap: [number, number] | null = null;
+  #pointerDown = false;
 
   constructor() {
     super();
@@ -123,6 +126,7 @@ export class Composer extends HTMLElement {
     this.#editor.addEventListener("beforeinput", this.#onBeforeInput);
     this.#editor.addEventListener("input", this.#onInput);
     this.#editor.addEventListener("compositionend", this.#onInput);
+    this.#editor.addEventListener("pointerdown", () => (this.#pointerDown = true));
     this.#editor.addEventListener("focus", () => (this.#valueAtFocus = this.#value));
     this.#editor.addEventListener("blur", () => {
       this.#updateActive(null);
@@ -136,10 +140,14 @@ export class Composer extends HTMLElement {
     if (!this.#dirty) this.#setValue(this.defaultValue);
     this.#syncEditable();
     document.addEventListener("selectionchange", this.#onSelectionChange);
+    document.addEventListener("pointerup", this.#onPointerUp);
+    document.addEventListener("pointercancel", this.#onPointerUp);
   }
 
   disconnectedCallback(): void {
     document.removeEventListener("selectionchange", this.#onSelectionChange);
+    document.removeEventListener("pointerup", this.#onPointerUp);
+    document.removeEventListener("pointercancel", this.#onPointerUp);
   }
 
   attributeChangedCallback(name: string, _old: string | null, next: string | null): void {
@@ -241,9 +249,7 @@ export class Composer extends HTMLElement {
   setSelectionRange(start: number, end: number): void {
     const clamp = (n: number) => Math.max(0, Math.min(this.#value.length, n));
     const [a, b] = [clamp(start), clamp(end)];
-    // Reveal syntax first, so the positions exist visibly and aren't snapped.
-    this.#updateActive([Math.min(a, b), Math.max(a, b)]);
-    document.getSelection()?.setBaseAndExtent(...this.#toDom(Math.min(a, b)), ...this.#toDom(Math.max(a, b)));
+    this.#select(Math.min(a, b), Math.max(a, b));
   }
 
   select(): void {
@@ -327,10 +333,36 @@ export class Composer extends HTMLElement {
     }
   }
 
+  /**
+   * Maps a range to source offsets. Ends outside the editor, e.g. when a drag
+   * leaves the element, clamp to the start or end of the source. A range that
+   * lies entirely outside is not ours.
+   */
   #toSource(range: AbstractRange): [number, number] | null {
-    const start = this.#fromDom(range.startContainer, range.startOffset);
-    const end = this.#fromDom(range.endContainer, range.endOffset);
-    return start === null || end === null ? null : [start, end];
+    const startSide = this.#sideOf(range.startContainer, range.startOffset);
+    const endSide = this.#sideOf(range.endContainer, range.endOffset);
+    if (startSide === null || endSide === null || (startSide !== 0 && startSide === endSide)) return null;
+    const clamp = (side: number, node: Node, offset: number) =>
+      side < 0 ? 0 : side > 0 ? this.#value.length : this.#fromDom(node, offset)!;
+    return [
+      clamp(startSide, range.startContainer, range.startOffset),
+      clamp(endSide, range.endContainer, range.endOffset),
+    ];
+  }
+
+  /** Whether a DOM position is before (-1), inside (0) or after (1) the editor. */
+  #sideOf(node: Node, offset: number): -1 | 0 | 1 | null {
+    if (node === this.#editor || this.#editor.contains(node)) return 0;
+    // Outside our shadow tree; compare against the host in its own tree.
+    const host = document.createRange();
+    host.selectNode(this);
+    try {
+      const side = host.comparePoint(node, offset);
+      // Inside the host but outside the editor means our own shadow root.
+      return side === 0 ? null : (side as -1 | 1);
+    } catch {
+      return null; // A different tree entirely, e.g. another shadow root.
+    }
   }
 
   #onInput = (event: Event): void => {
@@ -350,15 +382,74 @@ export class Composer extends HTMLElement {
 
   #onSelectionChange = (): void => {
     // A disabled or read-only editor can't take focus, but its text can still
-    // be selected, and the syntax rules follow that selection.
-    if (!this.#isEditable()) return this.#updateActive(this.#getSelection());
-    if (!this.#isFocused()) return this.#updateActive(null);
-
+    // be selected. With no caret to edit at, only a non-empty selection
+    // reveals syntax.
+    const editable = this.#isEditable();
+    if (editable && !this.#isFocused()) return this.#updateActive(null);
     const selection = this.#getSelection();
-    const snapped = selection && this.#snapOutOfHidden(selection);
-    if (snapped && snapped[0] !== selection[0]) return this.setSelectionRange(...snapped);
+    if (!selection) return this.#updateActive(null);
+    const [start, end] = selection;
+
+    if (start === end) {
+      if (!editable) this.#updateActive(null);
+      const [snapped] = this.#snapOutOfHidden(selection);
+      this.#anchorSnap = snapped !== start ? [start, snapped] : null;
+      // Revealing syntax under the pointer shifts the layout mid-press, which
+      // makes Chrome turn the drag into caret movement. Wait for the release.
+      if (this.#pointerDown) return;
+      // A read-only caret is invisible; the snap only matters if it grows.
+      if (editable && snapped !== start) return this.#select(snapped, snapped);
+      if (editable) this.#updateActive(selection);
+      return;
+    }
+
+    // Dragging from a snapped caret, the browser keeps its own anchor at the
+    // unsnapped position, e.g. `**bold|**`. Re-anchor at the snapped one.
+    if (this.#anchorSnap) {
+      const [from, to] = this.#anchorSnap;
+      if (start !== to && end !== to) {
+        if (start === from) return this.#select(to, end);
+        if (end === from) return this.#select(to, start);
+      }
+    }
+    // Nothing visible is selected. Revealing the tokens would move the text
+    // under the pointer, and the browser would move the selection in turn.
+    if (this.#coversOnlyHiddenSyntax(start, end)) return;
     this.#updateActive(selection);
   };
+
+  #onPointerUp = (): void => {
+    if (!this.#pointerDown) return;
+    this.#pointerDown = false;
+    // A drag that ends having selected only hidden syntax selected nothing.
+    const selection = this.#getSelection();
+    if (selection && selection[0] !== selection[1] && this.#coversOnlyHiddenSyntax(...selection)) {
+      const to = this.#anchorSnap?.[1];
+      const caret = to !== undefined && selection.includes(to) ? to : selection[0];
+      return this.#select(caret, caret);
+    }
+    this.#onSelectionChange();
+  };
+
+  /** Whether every character in [start, end) is a token of a hidden span. */
+  #coversOnlyHiddenSyntax(start: number, end: number): boolean {
+    for (let p = start; p < end; p++) {
+      const hidden = this.#spans.some(
+        ({ span, element }) =>
+          !element.classList.contains("active") &&
+          ((p >= span.start && p < span.start + span.open) || (p >= span.end - span.close && p < span.end)),
+      );
+      if (!hidden) return false;
+    }
+    return true;
+  }
+
+  /** Selects from anchor to focus (in source offsets), preserving direction. */
+  #select(anchor: number, focus: number): void {
+    // Reveal syntax first, so the positions exist visibly and aren't snapped.
+    if (this.#isEditable() || anchor !== focus) this.#updateActive([Math.min(anchor, focus), Math.max(anchor, focus)]);
+    document.getSelection()?.setBaseAndExtent(...this.#toDom(anchor), ...this.#toDom(focus));
+  }
 
   /**
    * The browser can only place the caret by the visible text, so beside hidden
