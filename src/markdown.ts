@@ -1,13 +1,24 @@
 /**
- * A span of inline Markdown, in source offsets. `start`/`end` cover the whole
- * span including its syntax tokens; `open`/`close` are the token lengths.
+ * A span of Markdown, in source offsets. `start`/`end` cover the whole span
+ * including its syntax tokens; `open`/`close` are the token lengths.
  */
-export interface InlineSpan {
-  type: "bold" | "italic" | "code";
+export type Span = InlineSpan | HeadingSpan;
+
+interface SpanBase {
   start: number;
   end: number;
   open: number;
   close: number;
+}
+
+export interface InlineSpan extends SpanBase {
+  type: "bold" | "italic" | "code";
+}
+
+/** An ATX heading. It ends at the end of its line, before the newline. */
+export interface HeadingSpan extends SpanBase {
+  type: "heading";
+  level: 1 | 2 | 3 | 4 | 5 | 6;
 }
 
 interface Delimiter {
@@ -29,25 +40,46 @@ interface Delimiter {
 const WHITESPACE = /\s/u;
 const PUNCTUATION = /[\p{P}\p{S}]/u;
 
+// https://spec.commonmark.org/0.31.2/#atx-headings
+const HEADING_OPEN = /^ {0,3}(#{1,6})(?:[ \t]+|$)/;
+const HEADING_CLOSE = /(?:^|[ \t]+)#+[ \t]*$/;
+const BLANK_LINE = /^[ \t]*$/;
+
 /**
- * Finds inline spans in the source, following CommonMark
- * (https://spec.commonmark.org/0.31.2/#inlines). Spans are properly nested,
- * ordered by start offset with outer spans first.
+ * Finds the spans in the source, following CommonMark
+ * (https://spec.commonmark.org/0.31.2/). Spans are properly nested, ordered by
+ * start offset with outer spans first.
  */
-export function parseInline(source: string): InlineSpan[] {
-  const spans: InlineSpan[] = [];
-  // Inlines never cross a paragraph break.
-  const paragraphBreak = /\n[ \t]*\n/g;
-  let from = 0;
-  for (const match of source.matchAll(paragraphBreak)) {
-    parseParagraph(source, from, match.index, spans);
-    from = match.index + match[0].length;
+export function parse(source: string): Span[] {
+  const spans: Span[] = [];
+  // Start of the paragraph being collected, if any.
+  let paragraph: number | null = null;
+  let lineStart = 0;
+  for (const line of source.split("\n")) {
+    const lineEnd = lineStart + line.length;
+    const heading = HEADING_OPEN.exec(line);
+    if (heading || BLANK_LINE.test(line)) {
+      // Headings and blank lines end paragraphs; inlines never cross them.
+      if (paragraph !== null) parseInlines(source, paragraph, lineStart - 1, spans);
+      paragraph = null;
+    } else {
+      paragraph ??= lineStart;
+    }
+    if (heading) {
+      const open = heading[0].length;
+      const close = HEADING_CLOSE.exec(line.slice(open))?.[0].length ?? 0;
+      const level = heading[1]!.length as HeadingSpan["level"];
+      spans.push({ type: "heading", level, start: lineStart, end: lineEnd, open, close });
+      parseInlines(source, lineStart + open, lineEnd - close, spans);
+    }
+    lineStart = lineEnd + 1;
   }
-  parseParagraph(source, from, source.length, spans);
+  if (paragraph !== null) parseInlines(source, paragraph, source.length, spans);
   return spans.sort((a, b) => a.start - b.start || b.end - a.end);
 }
 
-function parseParagraph(source: string, from: number, to: number, spans: InlineSpan[]): void {
+/** Finds inline spans in source[from, to). */
+function parseInlines(source: string, from: number, to: number, spans: Span[]): void {
   // Code spans bind tighter than emphasis: delimiters inside them are literal.
   const code = scanCodeSpans(source, from, to);
   spans.push(...code);
@@ -93,7 +125,7 @@ function runLength(source: string, i: number, to: number): number {
 }
 
 /** https://spec.commonmark.org/0.31.2/#emphasis-and-strong-emphasis */
-function parseEmphasis(source: string, from: number, to: number, code: InlineSpan[], spans: InlineSpan[]): void {
+function parseEmphasis(source: string, from: number, to: number, code: InlineSpan[], spans: Span[]): void {
   const delimiters = scanDelimiters(source, from, to, code);
 
   for (let c = 0; c < delimiters.length; c++) {

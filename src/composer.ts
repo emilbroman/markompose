@@ -1,10 +1,17 @@
-import { parseInline, type InlineSpan } from "./markdown";
+import { parse, type Span } from "./markdown";
 
-const SPAN_TAGS: Record<InlineSpan["type"], string> = {
-  bold: "strong",
-  italic: "em",
-  code: "code",
-};
+function tagFor(span: Span): string {
+  switch (span.type) {
+    case "bold":
+      return "strong";
+    case "italic":
+      return "em";
+    case "code":
+      return "code";
+    case "heading":
+      return `h${span.level}`;
+  }
+}
 
 function syntax(text: string): HTMLElement {
   const element = document.createElement("span");
@@ -64,6 +71,10 @@ const STYLES = `
 .md-syntax {
   color: GrayText;
 }
+.md-heading {
+  margin: 0.25em 0;
+  line-height: 1.25;
+}
 .md-code {
   font-family: ui-monospace, monospace;
   font-size: 0.9em;
@@ -105,7 +116,7 @@ export class Composer extends HTMLElement {
   #valueAtFocus = "";
   #dirty = false;
   #formDisabled = false;
-  #spans: { span: InlineSpan; element: HTMLElement }[] = [];
+  #spans: { span: Span; element: HTMLElement }[] = [];
   /** Where the last collapsed selection was, and where it snapped to. */
   #anchorSnap: [number, number] | null = null;
   #pointerDown = false;
@@ -392,8 +403,9 @@ export class Composer extends HTMLElement {
 
     if (start === end) {
       if (!editable) this.#updateActive(null);
-      const [snapped] = this.#snapOutOfHidden(selection);
-      this.#anchorSnap = snapped !== start ? [start, snapped] : null;
+      const snapped = this.#snapOutOfHidden(start, { headings: false });
+      const anchor = this.#snapOutOfHidden(start, { headings: true });
+      this.#anchorSnap = anchor !== start ? [start, anchor] : null;
       // Revealing syntax under the pointer shifts the layout mid-press, which
       // makes Chrome turn the drag into caret movement. Wait for the release.
       if (this.#pointerDown) return;
@@ -455,21 +467,23 @@ export class Composer extends HTMLElement {
    * The browser can only place the caret by the visible text, so beside hidden
    * syntax it ends up inside the span, e.g. `**bold|**` when clicking past the
    * end of the line. Move such a caret outside the span's tokens instead.
+   *
+   * A caret at the start of a heading's text is where the user means to type,
+   * so headings only count for where a drag from the caret starts, so that it
+   * selects the `#`s too.
    */
-  #snapOutOfHidden([start, end]: [number, number]): [number, number] {
-    if (start !== end) return [start, end];
+  #snapOutOfHidden(caret: number, { headings }: { headings: boolean }): number {
     // Repeat until stable: nested spans, like `***x***`, stack their tokens.
-    let caret = start;
     for (let moved = true; moved; ) {
       moved = false;
       for (const { span, element } of this.#spans) {
-        if (element.classList.contains("active")) continue;
+        if ((span.type === "heading" && !headings) || element.classList.contains("active")) continue;
         const next =
           caret === span.end - span.close ? span.end : caret === span.start + span.open ? span.start : caret;
         if (next !== caret) [caret, moved] = [next, true];
       }
     }
-    return [caret, caret];
+    return caret;
   }
 
   #isFocused(): boolean {
@@ -500,7 +514,7 @@ export class Composer extends HTMLElement {
     const source = this.#value;
     const fragment = document.createDocumentFragment();
     this.#spans = [];
-    this.#renderSpans(fragment, 0, source.length, parseInline(source));
+    this.#renderSpans(fragment, 0, source.length, parse(source));
     // A trailing newline doesn't produce a line box on its own.
     if (source.endsWith("\n")) {
       const br = document.createElement("br");
@@ -517,7 +531,7 @@ export class Composer extends HTMLElement {
    * Renders source[from, to) into parent. `spans` lie within that range,
    * properly nested, ordered by start with outer spans first.
    */
-  #renderSpans(parent: ParentNode, from: number, to: number, spans: InlineSpan[]): void {
+  #renderSpans(parent: ParentNode, from: number, to: number, spans: Span[]): void {
     const source = this.#value;
     let cursor = from;
     for (let i = 0; i < spans.length; ) {
@@ -527,15 +541,18 @@ export class Composer extends HTMLElement {
       while (j < spans.length && spans[j]!.start < span.end) j++;
 
       parent.append(source.slice(cursor, span.start));
-      const element = document.createElement(SPAN_TAGS[span.type]);
+      const element = document.createElement(tagFor(span));
       element.className = `md-span md-${span.type}`;
       element.append(syntax(source.slice(span.start, span.start + span.open)));
       this.#renderSpans(element, span.start + span.open, span.end - span.close, spans.slice(i + 1, j));
       element.append(syntax(source.slice(span.end - span.close, span.end)));
+      cursor = span.end;
+      // A block keeps its line's newline inside, where it doesn't add an
+      // empty line the way it would after the block.
+      if (span.type === "heading" && source[cursor] === "\n") element.append(source[cursor++]!);
       parent.append(element);
       this.#spans.push({ span, element });
 
-      cursor = span.end;
       i = j;
     }
     parent.append(source.slice(cursor, to));
@@ -550,8 +567,11 @@ export class Composer extends HTMLElement {
     const active = new Set(
       this.#spans.filter(({ span }) => selection !== null && selection[0] <= span.end && selection[1] >= span.start),
     );
-    const abuts = (a: InlineSpan, b: InlineSpan) =>
-      a.start + a.open === b.start || a.end - a.close === b.end || b.start + b.open === a.start || b.end - b.close === a.end;
+    // Only inline tokens stack; a heading's `#` isn't part of a `**` it abuts.
+    const abuts = (a: Span, b: Span) =>
+      a.type !== "heading" &&
+      b.type !== "heading" &&
+      (a.start + a.open === b.start || a.end - a.close === b.end || b.start + b.open === a.start || b.end - b.close === a.end);
     for (let grew = active.size > 0; grew; ) {
       grew = false;
       for (const entry of this.#spans) {
@@ -638,9 +658,11 @@ export class Composer extends HTMLElement {
     const walker = this.#leaves();
     for (let leaf = walker.nextNode(); leaf; leaf = walker.nextNode()) {
       if (leaf.nodeType === Node.TEXT_NODE) {
-        const length = (leaf as Text).length;
-        if (remaining <= length) return [leaf, remaining];
-        remaining -= length;
+        const { data } = leaf as Text;
+        // Right after a newline is the start of the next line, which may be
+        // in the next block rather than at the end of this one.
+        if (remaining < data.length || (remaining === data.length && !data.endsWith("\n"))) return [leaf, remaining];
+        remaining -= data.length;
       } else {
         const parent = leaf.parentNode!;
         if (remaining === 0) return [parent, Array.prototype.indexOf.call(parent.childNodes, leaf)];
