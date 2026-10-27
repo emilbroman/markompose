@@ -1,4 +1,4 @@
-import { parse, type LinkSpan, type Span } from "./markdown";
+import { parse, type LinkSpan, type QuoteMarkerSpan, type Span } from "./markdown";
 
 function tagFor(span: Span): string {
   switch (span.type) {
@@ -12,7 +12,30 @@ function tagFor(span: Span): string {
       return "a";
     case "heading":
       return `h${span.level}`;
+    case "blockquote":
+      return "blockquote";
+    case "quote-marker":
+      return "span";
   }
+}
+
+/** Block-level spans keep the newline that ends them inside their element. */
+function isBlock(span: Span): boolean {
+  return span.type === "heading" || span.type === "blockquote";
+}
+
+/**
+ * Spans whose syntax is at the start of a line. A caret after that syntax is
+ * where the user means to type, and their tokens don't stack with inline ones.
+ */
+function isLineSyntax(span: Span): boolean {
+  return isBlock(span) || span.type === "quote-marker";
+}
+
+/** The range a selection must touch for the span's syntax to show. */
+function revealRange(span: Span): [number, number] {
+  // A quote's markers show while any of the quote is touched.
+  return span.type === "quote-marker" ? [span.quote.start, span.quote.end] : [span.start, span.end];
 }
 
 // Schemes that run code rather than navigate.
@@ -23,6 +46,28 @@ function linkify(anchor: HTMLAnchorElement, span: LinkSpan): void {
   if (span.title !== undefined) anchor.title = span.title;
   anchor.target = "_blank";
   anchor.rel = "noopener noreferrer";
+}
+
+/** A `<br>` for layout only, that isn't part of the source. */
+function sentinel(): HTMLBRElement {
+  const br = document.createElement("br");
+  br.setAttribute(SENTINEL, "");
+  return br;
+}
+
+/** A caret just inside a span's tokens, moved to just outside them. */
+function outside(span: Span, caret: number): number {
+  // Opening side first: for a span that's all syntax, like a quote's `>`,
+  // after it is both, and the line's syntax starts before it.
+  if (caret === span.start + span.open) return span.start;
+  if (caret === span.end - span.close) return span.end;
+  return caret;
+}
+
+/** Whether a span is all of its line's text, like a lone `#` or `>`. */
+function isWholeLineSyntax(span: Span): boolean {
+  if (span.type === "heading") return span.start + span.open === span.end - span.close;
+  return span.type === "quote-marker" && span.end === span.lineEnd;
 }
 
 function syntax(text: string): HTMLElement {
@@ -85,7 +130,8 @@ const STYLES = `
 }
 .md-heading {
   margin: 0.25em 0;
-  line-height: 1.25;
+  /* In em, so a quote marker inside inherits the heading's line height. */
+  line-height: 1.25em;
 }
 .md-link {
   color: LinkText;
@@ -94,6 +140,46 @@ const STYLES = `
 /* While editing, links are followed with Cmd/Ctrl + click. */
 .editor.follow-links .md-link[href] {
   cursor: pointer;
+}
+.md-blockquote {
+  position: relative;
+  margin: 0;
+  /* As wide as the \`> \` marker, measured, so text stays put when it shows. */
+  padding-left: var(--md-quote-indent, 1em);
+}
+.md-blockquote::before {
+  content: "";
+  position: absolute;
+  inset-block: 0;
+  left: 0;
+  width: 2px;
+  background: #8886;
+}
+/*
+ * Markers sit in their quotes' indents: each is pulled left to its quote's
+ * edge, and its right margin returns to where it started, so that whichever
+ * of a line's markers show, they take no space.
+ */
+.md-quote-marker.active {
+  margin-left: calc(-1 * var(--md-shift, 0px));
+  margin-right: calc(var(--md-shift, 0px) - var(--md-width, 0px));
+}
+.md-heading > .md-quote-marker {
+  font-size: var(--md-font-size);
+  font-weight: var(--md-font-weight);
+}
+/*
+ * A line of nothing but hidden syntax would collapse. Hold it open with
+ * generated content, which isn't part of the source the way text would be.
+ */
+.md-syntax-line::before {
+  content: "\\200b";
+}
+.md-measure {
+  position: absolute;
+  visibility: hidden;
+  white-space: pre;
+  pointer-events: none;
 }
 .md-code {
   font-family: ui-monospace, monospace;
@@ -132,6 +218,8 @@ export class Composer extends HTMLElement {
 
   readonly #internals: ElementInternals;
   readonly #editor: HTMLDivElement;
+  /** Hidden text in the editor's font, to measure quote markers with. */
+  readonly #quoteMeasure: HTMLSpanElement;
   #value = "";
   #valueAtFocus = "";
   #dirty = false;
@@ -152,7 +240,11 @@ export class Composer extends HTMLElement {
     this.#editor.className = "editor";
     this.#editor.setAttribute("role", "textbox");
     this.#editor.setAttribute("aria-multiline", "true");
-    root.append(style, this.#editor);
+    this.#quoteMeasure = document.createElement("span");
+    this.#quoteMeasure.className = "md-measure";
+    this.#quoteMeasure.ariaHidden = "true";
+    this.#quoteMeasure.textContent = "> ";
+    root.append(style, this.#quoteMeasure, this.#editor);
 
     this.#editor.addEventListener("beforeinput", this.#onBeforeInput);
     this.#editor.addEventListener("input", this.#onInput);
@@ -172,6 +264,12 @@ export class Composer extends HTMLElement {
   connectedCallback(): void {
     if (!this.#dirty) this.#setValue(this.defaultValue);
     this.#syncEditable();
+    // Rendering before connection, or before web fonts load, measures wrong.
+    this.#layoutQuotes();
+    document.fonts.ready.then(() => {
+      this.#markerWidths.clear();
+      this.#layoutQuotes();
+    });
     document.addEventListener("selectionchange", this.#onSelectionChange);
     document.addEventListener("pointerup", this.#onPointerUp);
     document.addEventListener("pointercancel", this.#onPointerUp);
@@ -429,8 +527,8 @@ export class Composer extends HTMLElement {
 
     if (start === end) {
       if (!editable) this.#updateActive(null);
-      const snapped = this.#snapOutOfHidden(start, { headings: false });
-      const anchor = this.#snapOutOfHidden(start, { headings: true });
+      const snapped = this.#snapCaret(start);
+      const anchor = this.#snapAnchor(start);
       this.#anchorSnap = anchor !== start ? [start, anchor] : null;
       // Revealing syntax under the pointer shifts the layout mid-press, which
       // makes Chrome turn the drag into caret movement. Wait for the release.
@@ -519,21 +617,36 @@ export class Composer extends HTMLElement {
 
   /**
    * The browser can only place the caret by the visible text, so beside hidden
-   * syntax it ends up inside the span, e.g. `**bold|**` when clicking past the
-   * end of the line. Move such a caret outside the span's tokens instead.
+   * syntax it can land on either side of it. Where the caret goes:
    *
-   * A caret at the start of a heading's text is where the user means to type,
-   * so headings only count for where a drag from the caret starts, so that it
-   * selects the `#`s too.
+   * - Beside an inline span's hidden tokens, outside them, e.g. `**bold**|`
+   *   rather than `**bold|**` when clicking past the end of the line.
+   * - Beside hidden line syntax, like a heading's `#`s or a quote's `>`, after
+   *   it, where the line's text is, e.g. `> |text` rather than `|> text`.
    */
-  #snapOutOfHidden(caret: number, { headings }: { headings: boolean }): number {
-    // Repeat until stable: nested spans, like `***x***`, stack their tokens.
+  #snapCaret(caret: number): number {
+    return this.#snap(caret, (span, caret) => {
+      if (!isLineSyntax(span)) return outside(span, caret);
+      return caret === span.start ? span.start + span.open : caret;
+    });
+  }
+
+  /**
+   * Where a drag from a caret beside hidden syntax starts: outside all of it,
+   * so that once the syntax shows, the selection includes it.
+   */
+  #snapAnchor(caret: number): number {
+    return this.#snap(caret, outside);
+  }
+
+  /** Applies a snap for each hidden span until the caret settles. */
+  #snap(caret: number, step: (span: Span, caret: number) => number): number {
+    // Repeat: nested spans, like `***x***` or `> > x`, stack their tokens.
     for (let moved = true; moved; ) {
       moved = false;
       for (const { span, element } of this.#spans) {
-        if ((span.type === "heading" && !headings) || element.classList.contains("active")) continue;
-        const next =
-          caret === span.end - span.close ? span.end : caret === span.start + span.open ? span.start : caret;
+        if (element.classList.contains("active") || span.open + span.close === 0) continue;
+        const next = step(span, caret);
         if (next !== caret) [caret, moved] = [next, true];
       }
     }
@@ -570,22 +683,59 @@ export class Composer extends HTMLElement {
     this.#spans = [];
     this.#renderSpans(fragment, 0, source.length, parse(source));
     // A trailing newline doesn't produce a line box on its own.
-    if (source.endsWith("\n")) {
-      const br = document.createElement("br");
-      br.setAttribute(SENTINEL, "");
-      fragment.append(br);
-    }
+    if (source.endsWith("\n")) fragment.append(sentinel());
 
     this.#editor.replaceChildren(fragment);
     this.#editor.normalize();
     this.#updateActive(selection);
+    this.#layoutQuotes();
+  }
+
+  /** Widths of quote marker texts in the base font, by text. */
+  #markerWidths = new Map<string, number>();
+
+  /** Sizes quote indents and marker offsets to the marker text's widths. */
+  #layoutQuotes(): void {
+    const markers = this.#spans.filter(({ span }) => span.type === "quote-marker");
+    if (markers.length === 0) return;
+    const indent = this.#markerWidth("> ");
+    if (indent === 0) return; // Not rendered yet.
+
+    const { fontSize, fontWeight } = getComputedStyle(this.#quoteMeasure);
+    this.#editor.style.setProperty("--md-quote-indent", `${indent}px`);
+    // Quote markers inside headings use the base font, to match the indent.
+    this.#editor.style.setProperty("--md-font-size", fontSize);
+    this.#editor.style.setProperty("--md-font-weight", fontWeight);
+
+    // On a line in n nested quotes, the text starts n indents in. The marker
+    // of the quote i levels out from the innermost sits i + 1 indents back.
+    const lines = Map.groupBy(markers, ({ span }) => (span as QuoteMarkerSpan).lineEnd);
+    for (const line of lines.values()) {
+      line.sort((a, b) => a.span.start - b.span.start);
+      line.forEach(({ span, element }, i) => {
+        const width = this.#markerWidth(this.#value.slice(span.start, span.end));
+        element.style.setProperty("--md-shift", `${(line.length - i) * indent}px`);
+        element.style.setProperty("--md-width", `${width}px`);
+      });
+    }
+  }
+
+  #markerWidth(text: string): number {
+    let width = this.#markerWidths.get(text);
+    if (width === undefined) {
+      this.#quoteMeasure.textContent = text;
+      width = this.#quoteMeasure.getBoundingClientRect().width;
+      if (width > 0) this.#markerWidths.set(text, width);
+    }
+    return width;
   }
 
   /**
    * Renders source[from, to) into parent. `spans` lie within that range,
-   * properly nested, ordered by start with outer spans first.
+   * properly nested, ordered by start with outer spans first. Returns how far
+   * into the source it rendered, which is past `to` if a block took its newline.
    */
-  #renderSpans(parent: ParentNode, from: number, to: number, spans: Span[]): void {
+  #renderSpans(parent: ParentNode, from: number, to: number, spans: Span[]): number {
     const source = this.#value;
     let cursor = from;
     for (let i = 0; i < spans.length; ) {
@@ -594,23 +744,50 @@ export class Composer extends HTMLElement {
       let j = i + 1;
       while (j < spans.length && spans[j]!.start < span.end) j++;
 
-      parent.append(source.slice(cursor, span.start));
+      if (span.start > cursor) parent.append(source.slice(cursor, span.start));
       const element = document.createElement(tagFor(span));
       element.className = `md-span md-${span.type}`;
       if (span.type === "link") linkify(element as HTMLAnchorElement, span);
-      element.append(syntax(source.slice(span.start, span.start + span.open)));
-      this.#renderSpans(element, span.start + span.open, span.end - span.close, spans.slice(i + 1, j));
-      element.append(syntax(source.slice(span.end - span.close, span.end)));
-      cursor = span.end;
+      if (isWholeLineSyntax(span)) element.classList.add("md-syntax-line");
+      // Quote markers right before a block go inside it, so they're on the
+      // block's first line rather than a line of their own. The text order,
+      // and so the source, is the same.
+      if (isBlock(span)) {
+        const markers: Element[] = [];
+        for (let last = parent.lastChild; last instanceof Element && last.matches(".md-quote-marker"); ) {
+          markers.unshift(last);
+          last = last.previousSibling;
+        }
+        element.append(...markers);
+        // Chrome's line navigation skips the line before a block if that line
+        // ends in a newline character, but not if it ends in a <br>. Both
+        // serialize as a newline.
+        const before = parent.lastChild;
+        if (before instanceof Text && before.data.endsWith("\n")) {
+          before.deleteData(before.length - 1, 1);
+          parent.append(document.createElement("br"));
+        }
+      }
+      if (span.open > 0) element.append(syntax(source.slice(span.start, span.start + span.open)));
+      const rendered = this.#renderSpans(element, span.start + span.open, span.end - span.close, spans.slice(i + 1, j));
+      if (span.close > 0) element.append(syntax(source.slice(span.end - span.close, span.end)));
+      // A nested block ending on the same line may already hold the newline.
+      cursor = Math.max(span.end, rendered);
       // A block keeps its line's newline inside, where it doesn't add an
-      // empty line the way it would after the block.
-      if (span.type === "heading" && source[cursor] === "\n") element.append(source[cursor++]!);
+      // empty line the way it would after the block. In a node of its own:
+      // sharing one with the block's text, Chrome's arrow keys skip the line.
+      if (isBlock(span) && cursor === span.end && source[cursor] === "\n") {
+        const newline = document.createElement("span");
+        newline.textContent = source[cursor++]!;
+        element.append(newline);
+      }
       parent.append(element);
       this.#spans.push({ span, element });
 
       i = j;
     }
-    parent.append(source.slice(cursor, to));
+    if (to > cursor) parent.append(source.slice(cursor, to));
+    return Math.max(cursor, to);
   }
 
   /**
@@ -620,12 +797,15 @@ export class Composer extends HTMLElement {
    */
   #updateActive(selection: [number, number] | null): void {
     const active = new Set(
-      this.#spans.filter(({ span }) => selection !== null && selection[0] <= span.end && selection[1] >= span.start),
+      this.#spans.filter(({ span }) => {
+        const [start, end] = revealRange(span);
+        return selection !== null && selection[0] <= end && selection[1] >= start;
+      }),
     );
     // Only inline tokens stack; a heading's `#` isn't part of a `**` it abuts.
     const abuts = (a: Span, b: Span) =>
-      a.type !== "heading" &&
-      b.type !== "heading" &&
+      !isLineSyntax(a) &&
+      !isLineSyntax(b) &&
       (a.start + a.open === b.start || a.end - a.close === b.end || b.start + b.open === a.start || b.end - b.close === a.end);
     for (let grew = active.size > 0; grew; ) {
       grew = false;

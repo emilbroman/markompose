@@ -2,7 +2,7 @@
  * A span of Markdown, in source offsets. `start`/`end` cover the whole span
  * including its syntax tokens; `open`/`close` are the token lengths.
  */
-export type Span = InlineSpan | LinkSpan | HeadingSpan;
+export type Span = InlineSpan | LinkSpan | HeadingSpan | BlockquoteSpan | QuoteMarkerSpan;
 
 interface SpanBase {
   start: number;
@@ -20,6 +20,23 @@ export interface LinkSpan extends SpanBase {
   type: "link";
   href: string;
   title?: string;
+}
+
+/**
+ * A block quote. It has no tokens of its own; each of its lines starts with a
+ * QuoteMarkerSpan. It ends at the end of its last line, before the newline.
+ */
+export interface BlockquoteSpan extends SpanBase {
+  type: "blockquote";
+}
+
+/** The `>` that puts one line in a block quote; all of it is syntax. */
+export interface QuoteMarkerSpan extends SpanBase {
+  type: "quote-marker";
+  /** Where the marker's line ends. */
+  lineEnd: number;
+  /** The quote the marker belongs to. */
+  quote: BlockquoteSpan;
 }
 
 /** An ATX heading. It ends at the end of its line, before the newline. */
@@ -52,6 +69,15 @@ const HEADING_OPEN = /^ {0,3}(#{1,6})(?:[ \t]+|$)/;
 const HEADING_CLOSE = /(?:^|[ \t]+)#+[ \t]*$/;
 const BLANK_LINE = /^[ \t]*$/;
 
+// https://spec.commonmark.org/0.31.2/#block-quotes
+const QUOTE_MARKER = /^ {0,3}> ?/;
+
+/** A line of source; `content` is where it starts inside its containers. */
+interface Line {
+  content: number;
+  end: number;
+}
+
 /**
  * Finds the spans in the source, following CommonMark
  * (https://spec.commonmark.org/0.31.2/). Spans are properly nested, ordered by
@@ -59,30 +85,68 @@ const BLANK_LINE = /^[ \t]*$/;
  */
 export function parse(source: string): Span[] {
   const spans: Span[] = [];
-  // Start of the paragraph being collected, if any.
-  let paragraph: number | null = null;
+  const lines: Line[] = [];
   let lineStart = 0;
   for (const line of source.split("\n")) {
-    const lineEnd = lineStart + line.length;
-    const heading = HEADING_OPEN.exec(line);
-    if (heading || BLANK_LINE.test(line)) {
-      // Headings and blank lines end paragraphs; inlines never cross them.
-      if (paragraph !== null) parseInlines(source, paragraph, lineStart - 1, spans);
-      paragraph = null;
-    } else {
-      paragraph ??= lineStart;
-    }
-    if (heading) {
-      const open = heading[0].length;
-      const close = HEADING_CLOSE.exec(line.slice(open))?.[0].length ?? 0;
-      const level = heading[1]!.length as HeadingSpan["level"];
-      spans.push({ type: "heading", level, start: lineStart, end: lineEnd, open, close });
-      parseInlines(source, lineStart + open, lineEnd - close, spans);
-    }
-    lineStart = lineEnd + 1;
+    lines.push({ content: lineStart, end: lineStart + line.length });
+    lineStart += line.length + 1;
   }
-  if (paragraph !== null) parseInlines(source, paragraph, source.length, spans);
-  return spans.sort((a, b) => a.start - b.start || b.end - a.end);
+  parseBlocks(source, lines, spans);
+  // A quote of a lone `>` covers the same range as its marker; the container
+  // goes outside.
+  const rank = (span: Span) => (span.type === "blockquote" ? 0 : 1);
+  return spans.sort((a, b) => a.start - b.start || b.end - a.end || rank(a) - rank(b));
+}
+
+/** Parses consecutive lines as a sequence of blocks. */
+function parseBlocks(source: string, lines: Line[], spans: Span[]): void {
+  // Inlines never cross a block boundary, so collect paragraph lines first.
+  let paragraph: Line[] = [];
+  const endParagraph = () => {
+    if (paragraph.length > 0) parseInlines(source, paragraph[0]!.content, paragraph.at(-1)!.end, spans);
+    paragraph = [];
+  };
+
+  for (let i = 0; i < lines.length; ) {
+    const line = lines[i]!;
+    const text = source.slice(line.content, line.end);
+
+    if (QUOTE_MARKER.test(text)) {
+      endParagraph();
+      // Consecutive marked lines form the quote. CommonMark's lazy
+      // continuation lines, without a marker, aren't supported.
+      const quote: BlockquoteSpan = { type: "blockquote", start: line.content, end: line.end, open: 0, close: 0 };
+      const inner: Line[] = [];
+      for (; i < lines.length; i++) {
+        const { content, end } = lines[i]!;
+        const marker = QUOTE_MARKER.exec(source.slice(content, end));
+        if (!marker) break;
+        const length = marker[0].length;
+        spans.push({ type: "quote-marker", start: content, end: content + length, open: length, close: 0, lineEnd: end, quote });
+        inner.push({ content: content + length, end });
+        quote.end = end;
+      }
+      spans.push(quote);
+      parseBlocks(source, inner, spans);
+      continue;
+    }
+
+    const heading = HEADING_OPEN.exec(text);
+    if (heading) {
+      endParagraph();
+      const open = heading[0].length;
+      const close = HEADING_CLOSE.exec(text.slice(open))?.[0].length ?? 0;
+      const level = heading[1]!.length as HeadingSpan["level"];
+      spans.push({ type: "heading", level, start: line.content, end: line.end, open, close });
+      parseInlines(source, line.content + open, line.end - close, spans);
+    } else if (BLANK_LINE.test(text)) {
+      endParagraph();
+    } else {
+      paragraph.push(line);
+    }
+    i++;
+  }
+  endParagraph();
 }
 
 /** Finds inline spans in source[from, to). */
