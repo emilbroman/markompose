@@ -3,6 +3,7 @@ import { parseInline, type InlineSpan } from "./markdown";
 const SPAN_TAGS: Record<InlineSpan["type"], string> = {
   bold: "strong",
   italic: "em",
+  code: "code",
 };
 
 function syntax(text: string): HTMLElement {
@@ -62,6 +63,13 @@ const STYLES = `
 }
 .md-syntax {
   color: GrayText;
+}
+.md-code {
+  font-family: ui-monospace, monospace;
+  font-size: 0.9em;
+  background: #8882;
+  border-radius: 3px;
+  padding: 0.1em 0.2em;
 }
 /* Syntax tokens are only shown while the selection touches their span. */
 .md-span:not(.active) > .md-syntax {

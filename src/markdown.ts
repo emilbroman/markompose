@@ -3,7 +3,7 @@
  * span including its syntax tokens; `open`/`close` are the token lengths.
  */
 export interface InlineSpan {
-  type: "bold" | "italic";
+  type: "bold" | "italic" | "code";
   start: number;
   end: number;
   open: number;
@@ -30,25 +30,71 @@ const WHITESPACE = /\s/u;
 const PUNCTUATION = /[\p{P}\p{S}]/u;
 
 /**
- * Finds emphasis spans in the source, following CommonMark's delimiter run
- * rules (https://spec.commonmark.org/0.31.2/#emphasis-and-strong-emphasis).
- * Spans are properly nested, ordered by start offset with outer spans first.
+ * Finds inline spans in the source, following CommonMark
+ * (https://spec.commonmark.org/0.31.2/#inlines). Spans are properly nested,
+ * ordered by start offset with outer spans first.
  */
 export function parseInline(source: string): InlineSpan[] {
   const spans: InlineSpan[] = [];
-  // Emphasis never crosses a paragraph break.
+  // Inlines never cross a paragraph break.
   const paragraphBreak = /\n[ \t]*\n/g;
   let from = 0;
   for (const match of source.matchAll(paragraphBreak)) {
-    parseEmphasis(source, from, match.index, spans);
+    parseParagraph(source, from, match.index, spans);
     from = match.index + match[0].length;
   }
-  parseEmphasis(source, from, source.length, spans);
+  parseParagraph(source, from, source.length, spans);
   return spans.sort((a, b) => a.start - b.start || b.end - a.end);
 }
 
-function parseEmphasis(source: string, from: number, to: number, spans: InlineSpan[]): void {
-  const delimiters = scanDelimiters(source, from, to);
+function parseParagraph(source: string, from: number, to: number, spans: InlineSpan[]): void {
+  // Code spans bind tighter than emphasis: delimiters inside them are literal.
+  const code = scanCodeSpans(source, from, to);
+  spans.push(...code);
+  parseEmphasis(source, from, to, code, spans);
+}
+
+/** https://spec.commonmark.org/0.31.2/#code-spans */
+function scanCodeSpans(source: string, from: number, to: number): InlineSpan[] {
+  const spans: InlineSpan[] = [];
+  for (let i = from; i < to; i++) {
+    if (source[i] === "\\") {
+      i++; // An escaped backtick can't open a code span.
+      continue;
+    }
+    if (source[i] !== "`") continue;
+
+    const length = runLength(source, i, to);
+    // The closer is the next backtick run of exactly the same length.
+    let close = i + length;
+    while (close < to && !(source[close] === "`" && runLength(source, close, to) === length)) {
+      close += source[close] === "`" ? runLength(source, close, to) : 1;
+    }
+    if (close >= to) {
+      i += length - 1; // No closer: the run is literal.
+      continue;
+    }
+
+    // One space of padding on each side is stripped, unless the content is all
+    // spaces; treat it as part of the syntax.
+    const content = source.slice(i + length, close);
+    const padded = /^[ \n]/.test(content) && /[ \n]$/.test(content) && /[^ \n]/.test(content);
+    const token = length + (padded ? 1 : 0);
+    spans.push({ type: "code", start: i, end: close + length, open: token, close: token });
+    i = close + length - 1;
+  }
+  return spans;
+}
+
+function runLength(source: string, i: number, to: number): number {
+  let end = i;
+  while (end < to && source[end] === source[i]) end++;
+  return end - i;
+}
+
+/** https://spec.commonmark.org/0.31.2/#emphasis-and-strong-emphasis */
+function parseEmphasis(source: string, from: number, to: number, code: InlineSpan[], spans: InlineSpan[]): void {
+  const delimiters = scanDelimiters(source, from, to, code);
 
   for (let c = 0; c < delimiters.length; c++) {
     const closer = delimiters[c]!;
@@ -91,9 +137,16 @@ function findOpener(delimiters: Delimiter[], c: number): Delimiter | null {
   return null;
 }
 
-function scanDelimiters(source: string, from: number, to: number): Delimiter[] {
+function scanDelimiters(source: string, from: number, to: number, code: InlineSpan[]): Delimiter[] {
   const delimiters: Delimiter[] = [];
+  let nextCode = 0;
   for (let i = from; i < to; i++) {
+    const span = code[nextCode];
+    if (span && i === span.start) {
+      i = span.end - 1;
+      nextCode++;
+      continue;
+    }
     const char = source[i]!;
     if (char === "\\") {
       i++; // Skip the escaped character.
@@ -101,8 +154,7 @@ function scanDelimiters(source: string, from: number, to: number): Delimiter[] {
     }
     if (char !== "*" && char !== "_") continue;
 
-    let end = i;
-    while (end < to && source[end] === char) end++;
+    const end = i + runLength(source, i, to);
     // Line/paragraph boundaries count as whitespace.
     const before = i > from ? source[i - 1]! : " ";
     const after = end < to ? source[end]! : " ";
