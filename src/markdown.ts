@@ -2,7 +2,15 @@
  * A span of Markdown, in source offsets. `start`/`end` cover the whole span
  * including its syntax tokens; `open`/`close` are the token lengths.
  */
-export type Span = InlineSpan | LinkSpan | HeadingSpan | BlockquoteSpan | QuoteMarkerSpan;
+export type Span =
+  | InlineSpan
+  | LinkSpan
+  | HeadingSpan
+  | BlockquoteSpan
+  | QuoteMarkerSpan
+  | ListSpan
+  | ListItemSpan
+  | ListMarkerSpan;
 
 interface SpanBase {
   start: number;
@@ -39,6 +47,36 @@ export interface QuoteMarkerSpan extends SpanBase {
   quote: BlockquoteSpan;
 }
 
+/** Consecutive list items, whatever their markers. No tokens of its own. */
+export interface ListSpan extends SpanBase {
+  type: "list";
+  /** Whether the first item is numbered. */
+  ordered: boolean;
+}
+
+/** A list item. Each of its lines starts with a ListMarkerSpan. */
+export interface ListItemSpan extends SpanBase {
+  type: "list-item";
+}
+
+/**
+ * What puts a line in a list item: on its first line, the item's marker, like
+ * `- ` or `12. `; on later lines, indentation up to the item's text. Unlike
+ * other syntax, it's always shown, so it has no tokens: it's all content.
+ */
+export interface ListMarkerSpan extends SpanBase {
+  type: "list-marker";
+  /** Where the marker's line ends. */
+  lineEnd: number;
+  item: ListItemSpan;
+  list: ListSpan;
+  /**
+   * On an item's first line, the length of the marker up to its sigil's end,
+   * like `12.` in `12. `. Absent on later lines' indentation.
+   */
+  sigil?: number;
+}
+
 /** An ATX heading. It ends at the end of its line, before the newline. */
 export interface HeadingSpan extends SpanBase {
   type: "heading";
@@ -71,6 +109,10 @@ const BLANK_LINE = /^[ \t]*$/;
 
 // https://spec.commonmark.org/0.31.2/#block-quotes
 const QUOTE_MARKER = /^ {0,3}> ?/;
+// https://spec.commonmark.org/0.31.2/#list-items
+const LIST_MARKER = /^( {0,3})(?:[-+*]|(\d{1,9})([.)]))(?: +|$)/;
+// Not lists, but not supported yet either: https://spec.commonmark.org/0.31.2/#thematic-breaks
+const THEMATIC_BREAK = /^ {0,3}([-*_])(?:[ \t]*\1){2,}[ \t]*$/;
 
 /** A line of source; `content` is where it starts inside its containers. */
 interface Line {
@@ -92,9 +134,10 @@ export function parse(source: string): Span[] {
     lineStart += line.length + 1;
   }
   parseBlocks(source, lines, spans);
-  // A quote of a lone `>` covers the same range as its marker; the container
-  // goes outside.
-  const rank = (span: Span) => (span.type === "blockquote" ? 0 : 1);
+  // A lone `>` or `-` covers the same range as its containers; containers go
+  // outside.
+  const RANK: Partial<Record<Span["type"], number>> = { list: 0, "list-item": 1, blockquote: 2 };
+  const rank = (span: Span) => RANK[span.type] ?? 3;
   return spans.sort((a, b) => a.start - b.start || b.end - a.end || rank(a) - rank(b));
 }
 
@@ -131,6 +174,15 @@ function parseBlocks(source: string, lines: Line[], spans: Span[]): void {
       continue;
     }
 
+    const item = listItemAt(text);
+    // Only a list starting at 1 can interrupt a paragraph, so a line in a
+    // paragraph like `14. ` reads as text, as in CommonMark.
+    if (item && (paragraph.length === 0 || !item.number || item.number === 1)) {
+      endParagraph();
+      i = parseList(source, lines, i, spans);
+      continue;
+    }
+
     const heading = HEADING_OPEN.exec(text);
     if (heading) {
       endParagraph();
@@ -147,6 +199,95 @@ function parseBlocks(source: string, lines: Line[], spans: Span[]): void {
     i++;
   }
   endParagraph();
+}
+
+interface ListItemStart {
+  /** The marker's length, including the spaces after it. */
+  length: number;
+  /** The length up to the end of the sigil, like `-` or `12.`. */
+  sigil: number;
+  /** The column the item's text starts at; later lines indent to it. */
+  column: number;
+  /**
+   * Items of one kind make a list: bullets, whatever the character, or
+   * numbers with `.` or with `)`.
+   */
+  kind: "bullet" | "." | ")";
+  number?: number;
+}
+
+function listItemAt(text: string): ListItemStart | null {
+  if (THEMATIC_BREAK.test(text)) return null;
+  const match = LIST_MARKER.exec(text);
+  if (!match) return null;
+  const sigil = match[0].trimEnd().length;
+  // An item with no text yet has its text one space after the sigil.
+  const column = match[0].length === text.length ? sigil + 1 : match[0].length;
+  const kind = (match[3] as "." | ")" | undefined) ?? "bullet";
+  const start: ListItemStart = { length: match[0].length, sigil, column, kind };
+  if (match[2] !== undefined) start.number = Number(match[2]);
+  return start;
+}
+
+function indentOf(text: string): number {
+  return text.length - text.trimStart().length;
+}
+
+/**
+ * Parses the list starting at lines[i], and returns the index of the first
+ * line after it. Like quotes, items don't take lazy continuation lines: their
+ * later lines must be indented to the item's text, or be blank.
+ */
+function parseList(source: string, lines: Line[], i: number, spans: Span[]): number {
+  const textOf = ({ content, end }: Line) => source.slice(content, end);
+  const first = lines[i]!;
+  const { kind } = listItemAt(textOf(first))!;
+  const sameKind = (text: string) => listItemAt(text)?.kind === kind;
+  const list: ListSpan = {
+    type: "list",
+    ordered: kind !== "bullet",
+    start: first.content,
+    end: first.end,
+    open: 0,
+    close: 0,
+  };
+  spans.push(list);
+
+  let start: ListItemStart | null;
+  while (i < lines.length && (start = listItemAt(textOf(lines[i]!))) && start.kind === kind) {
+    const line = lines[i]!;
+    const item: ListItemSpan = { type: "list-item", start: line.content, end: line.end, open: 0, close: 0 };
+    const marker = (content: number, length: number, end: number, sigil?: number) => {
+      const span: ListMarkerSpan = { type: "list-marker", start: content, end: content + length, open: 0, close: 0, lineEnd: end, item, list };
+      if (sigil !== undefined) span.sigil = sigil;
+      spans.push(span);
+    };
+    marker(line.content, start.length, line.end, start.sigil);
+    const inner: Line[] = [{ content: line.content + start.length, end: line.end }];
+
+    for (i++; i < lines.length; i++) {
+      const text = textOf(lines[i]!);
+      if (BLANK_LINE.test(text)) {
+        // Blank lines belong to the item if it, or the list, goes on after.
+        let next = i;
+        while (next < lines.length && BLANK_LINE.test(textOf(lines[next]!))) next++;
+        const after = next < lines.length ? textOf(lines[next]!) : null;
+        if (after === null || (indentOf(after) < start.column && !sameKind(after))) break;
+      } else if (indentOf(text) < start.column) {
+        break;
+      }
+      const { content, end } = lines[i]!;
+      const indent = Math.min(indentOf(text), start.column);
+      if (indent > 0) marker(content, indent, end);
+      inner.push({ content: content + indent, end });
+    }
+
+    item.end = inner.at(-1)!.end;
+    list.end = item.end;
+    spans.push(item);
+    parseBlocks(source, inner, spans);
+  }
+  return i;
 }
 
 /** Finds inline spans in source[from, to). */

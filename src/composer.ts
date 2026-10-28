@@ -1,4 +1,4 @@
-import { parse, type LinkSpan, type QuoteMarkerSpan, type Span } from "./markdown";
+import { parse, type LinkSpan, type ListMarkerSpan, type ListSpan, type QuoteMarkerSpan, type Span } from "./markdown";
 
 function tagFor(span: Span): string {
   switch (span.type) {
@@ -18,12 +18,23 @@ function tagFor(span: Span): string {
       return "blockquote";
     case "quote-marker":
       return "span";
+    case "list":
+      return span.ordered ? "ol" : "ul";
+    case "list-item":
+      return "li";
+    case "list-marker":
+      return "span";
   }
+}
+
+/** Line prefixes: what puts a line in a container, like `> ` or `- `. */
+function isLinePrefix(span: Span): span is QuoteMarkerSpan | ListMarkerSpan {
+  return span.type === "quote-marker" || span.type === "list-marker";
 }
 
 /** Block-level spans keep the newline that ends them inside their element. */
 function isBlock(span: Span): boolean {
-  return span.type === "heading" || span.type === "blockquote";
+  return span.type === "heading" || span.type === "blockquote" || span.type === "list" || span.type === "list-item";
 }
 
 /**
@@ -31,13 +42,16 @@ function isBlock(span: Span): boolean {
  * where the user means to type, and their tokens don't stack with inline ones.
  */
 function isLineSyntax(span: Span): boolean {
-  return isBlock(span) || span.type === "quote-marker";
+  return isBlock(span) || isLinePrefix(span);
 }
 
 /** The range a selection must touch for the span's syntax to show. */
 function revealRange(span: Span): [number, number] {
-  // A quote's markers show while any of the quote is touched.
-  return span.type === "quote-marker" ? [span.quote.start, span.quote.end] : [span.start, span.end];
+  // A quote's markers show while any of the quote is touched, and a list's
+  // bullets show as they're written while any of the list is.
+  if (span.type === "quote-marker") return [span.quote.start, span.quote.end];
+  if (span.type === "list-marker") return [span.list.start, span.list.end];
+  return [span.start, span.end];
 }
 
 // Schemes that run code rather than navigate.
@@ -48,6 +62,34 @@ function linkify(anchor: HTMLAnchorElement, span: LinkSpan): void {
   if (span.title !== undefined) anchor.title = span.title;
   anchor.target = "_blank";
   anchor.rel = "noopener noreferrer";
+}
+
+/**
+ * Bullets are drawn as glyphs that sit nicely on the line: `*` aligns with the
+ * cap height, and `-` and `+` with the x-height, but these are centred.
+ */
+const BULLET_GLYPHS: Record<string, string> = { "*": "✶", "-": "‒", "+": "＋" };
+
+/** How far, in em, list markers are inset from their list's edge. */
+const LIST_INSET = 0.5;
+
+/** A bullet list's item marker, as opposed to a number or indentation. */
+function isBullet(span: Span): span is ListMarkerSpan {
+  return span.type === "list-marker" && span.sigil !== undefined && !span.list.ordered;
+}
+
+/**
+ * Renders a bullet marker's text with its bullet character, at `at`, drawn as
+ * its glyph. The character stays in the DOM, so the text is the same.
+ */
+function renderBullet(element: Element, text: string, at: number): void {
+  const bullet = document.createElement("span");
+  bullet.className = "md-bullet";
+  bullet.dataset.glyph = BULLET_GLYPHS[text[at]!];
+  const source = document.createElement("span");
+  source.textContent = text[at]!;
+  bullet.append(source);
+  element.append(...[text.slice(0, at), bullet, text.slice(at + 1)].filter((part) => part !== ""));
 }
 
 /** A `<br>` for layout only, that isn't part of the source. */
@@ -158,15 +200,56 @@ const STYLES = `
   background: #8886;
 }
 /*
- * Markers sit in their quotes' indents: each is pulled left to its quote's
- * edge, and its right margin returns to where it started, so that whichever
- * of a line's markers show, they take no space.
+ * Line prefixes sit in their containers' gutters: each is pulled left into
+ * place, and its right margin returns to where it started, so that whichever
+ * of a line's prefixes show, they take no space. Quote markers only show with
+ * the rest of the syntax; list markers always do.
  */
-.md-quote-marker.active {
-  margin-left: calc(-1 * var(--md-shift, 0px));
-  margin-right: calc(var(--md-shift, 0px) - var(--md-width, 0px));
+.md-quote-marker.active,
+.md-list-marker {
+  margin-left: var(--md-margin-left, 0px);
+  margin-right: var(--md-margin-right, 0px);
 }
-.md-heading > .md-quote-marker {
+/*
+ * Equal-width digits, so numbers' digits line up too. The measuring element
+ * matches, so gutters are sized to what's drawn.
+ */
+.md-list-marker,
+.md-measure {
+  font-variant-numeric: tabular-nums;
+}
+/*
+ * Bullets are drawn as other glyphs, see BULLET_GLYPHS, unless the selection
+ * touches their list. Either way, the bullet is 1em wide and centred, so
+ * bullets align, and so text doesn't move between the two. The character
+ * stays, invisible under its glyph, padded out (or in) to that width, so
+ * carets either side of it are either side of the glyph. Not an inline-block:
+ * Chrome's caret movement treats the inside of one as a line of its own.
+ */
+.md-bullet {
+  position: relative;
+  padding-inline: max(0px, var(--md-bullet-pad, 0px));
+  margin-inline: min(0px, var(--md-bullet-pad, 0px));
+}
+.md-list-marker:not(.active) .md-bullet > span {
+  color: transparent;
+}
+.md-list-marker:not(.active) .md-bullet::before {
+  content: attr(data-glyph);
+  position: absolute;
+  inset-inline: 0;
+  text-align: center;
+}
+.md-list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+/* As wide as the list's widest marker, measured. */
+.md-list-item {
+  padding-left: var(--md-gutter, 1.5em);
+}
+.md-heading > .md-line-prefix {
   font-size: var(--md-font-size);
   font-weight: var(--md-font-weight);
 }
@@ -249,6 +332,8 @@ export class Composer extends HTMLElement {
     root.append(style, this.#quoteMeasure, this.#editor);
 
     this.#editor.addEventListener("beforeinput", this.#onBeforeInput);
+    this.#editor.addEventListener("copy", this.#onCopy);
+    this.#editor.addEventListener("cut", this.#onCopy);
     this.#editor.addEventListener("input", this.#onInput);
     this.#editor.addEventListener("compositionend", this.#onInput);
     this.#editor.addEventListener("pointerdown", this.#onPointerDown);
@@ -267,10 +352,10 @@ export class Composer extends HTMLElement {
     if (!this.#dirty) this.#setValue(this.defaultValue);
     this.#syncEditable();
     // Rendering before connection, or before web fonts load, measures wrong.
-    this.#layoutQuotes();
+    this.#layoutPrefixes();
     document.fonts.ready.then(() => {
       this.#markerWidths.clear();
-      this.#layoutQuotes();
+      this.#layoutPrefixes();
     });
     document.addEventListener("selectionchange", this.#onSelectionChange);
     document.addEventListener("pointerup", this.#onPointerUp);
@@ -420,17 +505,33 @@ export class Composer extends HTMLElement {
     const edit = this.#editFor(event);
     if (!edit) return;
     event.preventDefault();
-    const [start, end, text] = edit;
+    // Cancelling beforeinput suppresses the native input event.
+    this.#edit(...edit, new InputEvent("input", { bubbles: true, composed: true, inputType: event.inputType, data: event.data }));
+  };
+
+  /** Replaces source[start, end) with text, re-renders, and announces it. */
+  #edit(start: number, end: number, text: string, event: InputEvent): void {
     this.#dirty = true;
     this.#value = this.#value.slice(0, start) + text + this.#value.slice(end);
     this.#internals.setFormValue(this.#value);
     const caret = start + text.length;
     this.#render([caret, caret]);
     this.setSelectionRange(caret, caret);
-    // Cancelling beforeinput suppresses the native input event.
-    this.dispatchEvent(
-      new InputEvent("input", { bubbles: true, composed: true, inputType: event.inputType, data: event.data }),
-    );
+    this.dispatchEvent(event);
+  }
+
+  /**
+   * Copies the selected source. The browser would copy the rendered text,
+   * which leaves out hidden characters, like a bullet drawn as another glyph.
+   */
+  #onCopy = (event: ClipboardEvent): void => {
+    const selection = this.#getSelection();
+    if (!selection || selection[0] === selection[1] || !event.clipboardData) return;
+    event.preventDefault();
+    event.clipboardData.setData("text/plain", this.#value.slice(...selection));
+    if (event.type === "cut" && this.#isEditable()) {
+      this.#edit(...selection, "", new InputEvent("input", { bubbles: true, composed: true, inputType: "deleteByCut" }));
+    }
   };
 
   /** Translates an input event into a source edit: replace [start, end) with text. */
@@ -690,39 +791,83 @@ export class Composer extends HTMLElement {
     this.#editor.replaceChildren(fragment);
     this.#editor.normalize();
     this.#updateActive(selection);
-    this.#layoutQuotes();
+    this.#layoutPrefixes();
   }
 
-  /** Widths of quote marker texts in the base font, by text. */
+  /** Widths of texts in the base font, for laying out line prefixes. */
   #markerWidths = new Map<string, number>();
 
-  /** Sizes quote indents and marker offsets to the marker text's widths. */
-  #layoutQuotes(): void {
-    const markers = this.#spans.filter(({ span }) => span.type === "quote-marker");
-    if (markers.length === 0) return;
+  /**
+   * Sizes container gutters and places line prefixes in them. A quote's gutter
+   * is as wide as `> `, and a list's as its widest marker, a space, and an
+   * inset. Each
+   * prefix gets margins that place it in its container's gutter but leave the
+   * line's text where it is.
+   */
+  #layoutPrefixes(): void {
+    const prefixes = this.#spans.filter(({ span }) => isLinePrefix(span));
+    if (prefixes.length === 0) return;
     const indent = this.#markerWidth("> ");
+    const space = this.#markerWidth(" ");
     if (indent === 0) return; // Not rendered yet.
 
     const { fontSize, fontWeight } = getComputedStyle(this.#quoteMeasure);
     this.#editor.style.setProperty("--md-quote-indent", `${indent}px`);
-    // Quote markers inside headings use the base font, to match the indent.
+    // Line prefixes inside headings use the base font, to match the gutters.
     this.#editor.style.setProperty("--md-font-size", fontSize);
     this.#editor.style.setProperty("--md-font-weight", fontWeight);
 
-    // On a line in n nested quotes, the text starts n indents in. The marker
-    // of the quote i levels out from the innermost sits i + 1 indents back.
-    const lines = Map.groupBy(markers, ({ span }) => (span as QuoteMarkerSpan).lineEnd);
+    // Widths of a prefix's text as drawn, from its start to `end`. A bullet
+    // is 1em wide, drawn as a glyph or not.
+    const em = parseFloat(fontSize);
+    const widthOf = (span: QuoteMarkerSpan | ListMarkerSpan, end = span.end) => {
+      const text = this.#value.slice(span.start, end);
+      if (!isBullet(span)) return this.#markerWidth(text);
+      const at = span.sigil! - 1;
+      return this.#markerWidth(text.slice(0, at)) + em + this.#markerWidth(text.slice(at + 1));
+    };
+    const gutters = new Map<ListSpan, number>();
+    for (const { span } of prefixes) {
+      if (span.type !== "list-marker" || span.sigil === undefined) continue;
+      // Markers are inset a little from the list's edge.
+      const width = LIST_INSET * em + widthOf(span, span.start + span.sigil) + space;
+      gutters.set(span.list, Math.max(gutters.get(span.list) ?? 0, width));
+    }
+    for (const { span, element } of this.#spans) {
+      if (span.type === "list") element.style.setProperty("--md-gutter", `${gutters.get(span)}px`);
+    }
+    const gutterOf = (span: QuoteMarkerSpan | ListMarkerSpan) =>
+      span.type === "quote-marker" ? indent : gutters.get(span.list)!;
+
+    // A line's text starts after all its containers' gutters. Working inwards
+    // from the outermost, each prefix's gutter starts `back` before the text.
+    const lines = Map.groupBy(prefixes, ({ span }) => (span as QuoteMarkerSpan | ListMarkerSpan).lineEnd);
     for (const line of lines.values()) {
       line.sort((a, b) => a.span.start - b.span.start);
-      line.forEach(({ span, element }, i) => {
-        const width = this.#markerWidth(this.#value.slice(span.start, span.end));
-        element.style.setProperty("--md-shift", `${(line.length - i) * indent}px`);
-        element.style.setProperty("--md-width", `${width}px`);
-      });
+      let back = line.reduce((sum, { span }) => sum + gutterOf(span as QuoteMarkerSpan | ListMarkerSpan), 0);
+      for (const { span, element } of line) {
+        const prefix = span as QuoteMarkerSpan | ListMarkerSpan;
+        const width = widthOf(prefix);
+        // Quote markers and indentation sit at the gutter's start. A list
+        // marker sits at its end, less a space, so markers align on the right.
+        const left =
+          prefix.type === "list-marker" && prefix.sigil !== undefined
+            ? -back + gutterOf(prefix) - space - widthOf(prefix, prefix.start + prefix.sigil)
+            : -back;
+        if (isBullet(prefix)) {
+          const char = this.#value[prefix.start + prefix.sigil! - 1]!;
+          const pad = (em - this.#markerWidth(char)) / 2;
+          element.style.setProperty("--md-bullet-pad", `${pad}px`);
+        }
+        element.style.setProperty("--md-margin-left", `${left}px`);
+        element.style.setProperty("--md-margin-right", `${-(left + width)}px`);
+        back -= gutterOf(prefix);
+      }
     }
   }
 
   #markerWidth(text: string): number {
+    if (text === "") return 0;
     let width = this.#markerWidths.get(text);
     if (width === undefined) {
       this.#quoteMeasure.textContent = text;
@@ -751,12 +896,15 @@ export class Composer extends HTMLElement {
       element.className = `md-span md-${span.type}`;
       if (span.type === "link") linkify(element as HTMLAnchorElement, span);
       if (isWholeLineSyntax(span)) element.classList.add("md-syntax-line");
+      if (isLinePrefix(span)) element.classList.add("md-line-prefix");
+      // Lets pages style list markers from outside, with ::part(list-marker).
+      if (span.type === "list-marker" && span.sigil !== undefined) element.part.add("list-marker");
       // Quote markers right before a block go inside it, so they're on the
       // block's first line rather than a line of their own. The text order,
       // and so the source, is the same.
       if (isBlock(span)) {
         const markers: Element[] = [];
-        for (let last = parent.lastChild; last instanceof Element && last.matches(".md-quote-marker"); ) {
+        for (let last = parent.lastChild; last instanceof Element && last.matches(".md-line-prefix"); ) {
           markers.unshift(last);
           last = last.previousSibling;
         }
@@ -771,7 +919,9 @@ export class Composer extends HTMLElement {
         }
       }
       if (span.open > 0) element.append(syntax(source.slice(span.start, span.start + span.open)));
-      const rendered = this.#renderSpans(element, span.start + span.open, span.end - span.close, spans.slice(i + 1, j));
+      let rendered = span.end;
+      if (isBullet(span)) renderBullet(element, source.slice(span.start, span.end), span.sigil! - 1);
+      else rendered = this.#renderSpans(element, span.start + span.open, span.end - span.close, spans.slice(i + 1, j));
       if (span.close > 0) element.append(syntax(source.slice(span.end - span.close, span.end)));
       // A nested block ending on the same line may already hold the newline.
       cursor = Math.max(span.end, rendered);
