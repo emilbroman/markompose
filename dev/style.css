@@ -90,3 +90,7 @@ label:has(markompose-composer) {
   display: flex;
   flex-direction: column;
 }
+
+markompose-composer::part(list-marker) {
+  opacity: 0.55;
+}
