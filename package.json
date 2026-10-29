@@ -13,6 +13,10 @@
     ".": {
       "types": "./dist/index.d.ts",
       "import": "./dist/markompose.js"
+    },
+    "./lezer": {
+      "types": "./dist/lezer.d.ts",
+      "import": "./dist/lezer.js"
     }
   },
   "scripts": {
@@ -21,7 +25,23 @@
     "typecheck": "tsc --noEmit",
     "preview": "vite preview"
   },
+  "peerDependencies": {
+    "@lezer/common": "^1.5.4",
+    "@lezer/highlight": "^1.2.5"
+  },
+  "peerDependenciesMeta": {
+    "@lezer/common": {
+      "optional": true
+    },
+    "@lezer/highlight": {
+      "optional": true
+    }
+  },
   "devDependencies": {
+    "@lezer/common": "^1.5.4",
+    "@lezer/highlight": "^1.2.5",
+    "@lezer/javascript": "^1.5.6",
+    "@lezer/rust": "^1.0.3",
     "typescript": "^7.0.2",
     "vite": "^8.3.5"
   }

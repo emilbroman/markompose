@@ -5,9 +5,13 @@ export default defineConfig({
     // Declarations are emitted into dist/ by tsc before vite runs.
     emptyOutDir: false,
     lib: {
-      entry: "src/index.ts",
+      entry: { markompose: "src/index.ts", lezer: "src/lezer.ts" },
       formats: ["es"],
-      fileName: "markompose",
+    },
+    rollupOptions: {
+      // Lezer is a peer dependency of markompose/lezer. The composer is shared
+      // between the entries, so both see the same element and its languages.
+      external: [/^@lezer\//],
     },
   },
 });

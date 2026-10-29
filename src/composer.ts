@@ -1,4 +1,21 @@
-import { parse, type LinkSpan, type ListMarkerSpan, type ListSpan, type QuoteMarkerSpan, type Span } from "./markdown";
+import { highlighterFor, registerHighlighter, type Highlighter } from "./highlight";
+import {
+  parse,
+  type CodeBlockSpan,
+  type LinkSpan,
+  type ListMarkerSpan,
+  type ListSpan,
+  type QuoteMarkerSpan,
+  type Span,
+} from "./markdown";
+
+/** A highlighted range of a code block, for rendering only. Never nests. */
+interface TokenSpan {
+  type: "token";
+  start: number;
+  end: number;
+  names: string[];
+}
 
 function tagFor(span: Span): string {
   switch (span.type) {
@@ -98,6 +115,50 @@ function renderBullet(element: Element, text: string, at: number): void {
   source.textContent = text[at]!;
   bullet.append(source);
   element.append(...[text.slice(0, at), bullet, text.slice(at + 1)].filter((part) => part !== ""));
+}
+
+/**
+ * Highlights a code block's code, if there's a highlighter for its language.
+ * Returns its nested spans, which are its lines' prefixes, with the tokens.
+ * The code is the block's lines without those prefixes, so tokens that run
+ * across prefixes, like a comment in a quote, are split around them.
+ */
+function highlight(source: string, block: CodeBlockSpan, prefixes: Span[]): (Span | TokenSpan)[] {
+  const highlighter = highlighterFor(block.info);
+  if (!highlighter) return prefixes;
+  // The source ranges the code is made of.
+  const pieces: [number, number][] = [];
+  let at = block.start + block.open;
+  for (const prefix of prefixes) {
+    if (prefix.start > at) pieces.push([at, prefix.start]);
+    at = Math.max(at, prefix.end);
+  }
+  if (block.end - block.close > at) pieces.push([at, block.end - block.close]);
+  const code = pieces.map((piece) => source.slice(...piece)).join("");
+
+  let tokens: { start: number; end: number; tag: string }[];
+  try {
+    tokens = [...highlighter(code)].sort((a, b) => a.start - b.start);
+  } catch (error) {
+    console.error(error);
+    return prefixes; // Unhighlighted beats unrendered.
+  }
+  const spans: TokenSpan[] = [];
+  // Where in the code pieces[k] starts.
+  let base = 0;
+  let k = 0;
+  for (const token of tokens) {
+    const names = token.tag.split(/\s+/).filter(Boolean);
+    const end = Math.min(token.end, code.length);
+    for (let from = token.start; from < end && names.length > 0; ) {
+      while (k < pieces.length && base + pieces[k]![1] - pieces[k]![0] <= from) base += pieces[k]![1] - pieces[k++]![0];
+      const [start, stop] = pieces[k]!;
+      const to = Math.min(end, base + stop - start);
+      spans.push({ type: "token", start: start + from - base, end: start + to - base, names });
+      from = to;
+    }
+  }
+  return [...prefixes, ...spans].sort((a, b) => a.start - b.start);
 }
 
 /** A `<br>` for layout only, that isn't part of the source. */
@@ -276,6 +337,19 @@ const STYLES = `
   display: inline;
   color: transparent;
 }
+/*
+ * Highlighted code. Each token has its names as classes and parts, like
+ * \`md-tok-keyword\` and \`tok-keyword\`. Colours can be set with properties,
+ * like \`--md-tok-keyword\`, or from outside with \`::part(tok-keyword)\`.
+ */
+.md-tok-keyword { color: var(--md-tok-keyword, light-dark(#a626a4, #c678dd)); }
+.md-tok-string, .md-tok-string2, .md-tok-inserted { color: var(--md-tok-string, light-dark(#50a14f, #98c379)); }
+.md-tok-number, .md-tok-bool, .md-tok-atom, .md-tok-literal { color: var(--md-tok-literal, light-dark(#986801, #d19a66)); }
+.md-tok-typeName, .md-tok-className, .md-tok-namespace { color: var(--md-tok-type, light-dark(#c18401, #e5c07b)); }
+.md-tok-propertyName, .md-tok-macroName, .md-tok-definition { color: var(--md-tok-name, light-dark(#4078f2, #61afef)); }
+.md-tok-labelName, .md-tok-variableName2, .md-tok-deleted, .md-tok-invalid { color: var(--md-tok-special, light-dark(#e45649, #e06c75)); }
+.md-tok-comment, .md-tok-meta { color: var(--md-tok-comment, GrayText); }
+.md-tok-comment { font-style: italic; }
 .md-code-block > .md-line-prefix,
 .md-heading > .md-line-prefix {
   font-family: var(--md-font-family);
@@ -324,6 +398,19 @@ export class Composer extends HTMLElement {
   static readonly tagName = "markompose-composer";
   static readonly formAssociated = true;
   static readonly observedAttributes = ["placeholder", "disabled", "readonly"];
+
+  /** Connected composers, to re-render when languages are registered. */
+  static readonly #connected = new Set<Composer>();
+
+  /**
+   * Highlights code blocks in the given languages, named by the info string
+   * after their opening fence, like ```` ```ts ````. Global, for every
+   * composer. See `markompose/lezer` for highlighting with Lezer parsers.
+   */
+  static registerHighlighter(languages: string | string[], highlighter: Highlighter): void {
+    registerHighlighter(languages, highlighter);
+    for (const composer of Composer.#connected) composer.#rerender();
+  }
 
   /** Registers the element under `tagName` (or a custom name). Idempotent. */
   static define(tagName: string = Composer.tagName): void {
@@ -386,6 +473,7 @@ export class Composer extends HTMLElement {
       this.#markerWidths.clear();
       this.#layoutPrefixes();
     });
+    Composer.#connected.add(this);
     document.addEventListener("selectionchange", this.#onSelectionChange);
     document.addEventListener("pointerup", this.#onPointerUp);
     document.addEventListener("pointercancel", this.#onPointerUp);
@@ -394,6 +482,7 @@ export class Composer extends HTMLElement {
   }
 
   disconnectedCallback(): void {
+    Composer.#connected.delete(this);
     document.removeEventListener("selectionchange", this.#onSelectionChange);
     document.removeEventListener("pointerup", this.#onPointerUp);
     document.removeEventListener("pointercancel", this.#onPointerUp);
@@ -801,6 +890,13 @@ export class Composer extends HTMLElement {
     this.#internals.setFormValue(value);
   }
 
+  /** Renders again in place, keeping the selection. */
+  #rerender(): void {
+    const selection = this.#getSelection();
+    this.#render(selection);
+    if (selection) this.setSelectionRange(...selection);
+  }
+
   #syncEditable(): void {
     this.#editor.contentEditable = this.#isEditable() ? "plaintext-only" : "false";
     this.#editor.setAttribute("aria-readonly", String(this.readOnly));
@@ -915,7 +1011,7 @@ export class Composer extends HTMLElement {
    * properly nested, ordered by start with outer spans first. Returns how far
    * into the source it rendered, which is past `to` if a block took its newline.
    */
-  #renderSpans(parent: ParentNode, from: number, to: number, spans: Span[]): number {
+  #renderSpans(parent: ParentNode, from: number, to: number, spans: (Span | TokenSpan)[]): number {
     const source = this.#value;
     let cursor = from;
     for (let i = 0; i < spans.length; ) {
@@ -925,6 +1021,16 @@ export class Composer extends HTMLElement {
       while (j < spans.length && spans[j]!.start < span.end) j++;
 
       if (span.start > cursor) parent.append(source.slice(cursor, span.start));
+      if (span.type === "token") {
+        const element = document.createElement("span");
+        element.className = span.names.map((name) => `md-tok-${name}`).join(" ");
+        element.part.add(...span.names.map((name) => `tok-${name}`));
+        element.textContent = source.slice(span.start, span.end);
+        parent.append(element);
+        cursor = span.end;
+        i = j;
+        continue;
+      }
       const element = document.createElement(tagFor(span));
       element.className = `md-span md-${span.type}`;
       if (span.type === "link") linkify(element as HTMLAnchorElement, span);
@@ -954,7 +1060,11 @@ export class Composer extends HTMLElement {
       if (span.open > 0) element.append(syntax(source.slice(span.start, span.start + span.open)));
       let rendered = span.end;
       if (isBullet(span)) renderBullet(element, source.slice(span.start, span.end), span.sigil! - 1);
-      else rendered = this.#renderSpans(element, span.start + span.open, span.end - span.close, spans.slice(i + 1, j));
+      else {
+        const nested = spans.slice(i + 1, j) as Span[];
+        const children = span.type === "code-block" ? highlight(source, span, nested) : nested;
+        rendered = this.#renderSpans(element, span.start + span.open, span.end - span.close, children);
+      }
       if (span.close > 0) element.append(syntax(source.slice(span.end - span.close, span.end)));
       // A nested block ending on the same line may already hold the newline.
       cursor = Math.max(span.end, rendered);

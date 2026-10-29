@@ -18,6 +18,23 @@ document.body.append(composer);
 
 `Composer` exposes the same API as `<textarea>`: `value`, `defaultValue`, `selectionStart`/`selectionEnd`, `setSelectionRange()`, `select()`, `placeholder`, `disabled`, `readOnly`, and `name`. It also takes part in forms (submit, reset, and disabled fieldsets), and fires `input` and `change`.
 
+## Syntax highlighting
+
+Code blocks are highlighted by the language after their opening fence, like ```` ```ts ````. No languages are built in; you register them globally. With [Lezer](https://lezer.codemirror.net) parsers, install `@lezer/common` and `@lezer/highlight` along with the grammars you want, then:
+
+```ts
+import { registerLanguage } from "markompose/lezer";
+import { parser as javascript } from "@lezer/javascript";
+import { parser as rust } from "@lezer/rust";
+
+registerLanguage(["ts", "typescript"], javascript.configure({ dialect: "ts" }));
+registerLanguage(["rs", "rust"], rust);
+```
+
+Any other highlighter can register with `Composer.registerHighlighter(languages, highlighter)`. A highlighter is a function from code to non-overlapping `{ start, end, tag }` ranges.
+
+Each token is styled by its tag's names. Override the default colours with `--md-tok-keyword`, `--md-tok-string`, `--md-tok-literal`, `--md-tok-type`, `--md-tok-name`, `--md-tok-special` and `--md-tok-comment`, or style the tokens directly with `markompose-composer::part(tok-keyword)` and so on.
+
 ## Development
 
 Run `nix develop` to get a shell with Node, then:

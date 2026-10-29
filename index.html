@@ -34,6 +34,38 @@ This is **bold**, this is *italic*, and this is `code`.
       </section>
 
       <section>
+        <h2>Code blocks (TypeScript and Rust registered with markompose/lezer)</h2>
+        <markompose-composer class="full">
+```ts
+// Greets everyone, eventually.
+export async function greet(names: string[]): Promise&lt;void&gt; {
+  for (const name of names) console.log(`Hello, ${name}!`);
+}
+```
+
+```rust
+/// A point in space.
+#[derive(Debug, Clone, Copy)]
+struct Point&lt;'a&gt; { x: f64, label: &amp;'a str }
+
+fn main() {
+    let p = Point { x: 1.5, label: "origin" };
+    println!("{:?}", p);
+}
+```
+
+> ```ts
+> const quoted = /* across
+> lines */ true;
+> ```
+
+```python
+print("No highlighter registered, so plain")
+```
+</markompose-composer>
+      </section>
+
+      <section>
         <h2>Fixed height, scrolling</h2>
         <markompose-composer class="fixed" id="long"></markompose-composer>
       </section>

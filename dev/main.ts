@@ -1,4 +1,10 @@
+import { parser as javascript } from "@lezer/javascript";
+import { parser as rust } from "@lezer/rust";
 import { Composer } from "../src";
+import { registerLanguage } from "../src/lezer";
+
+registerLanguage(["ts", "typescript"], javascript.configure({ dialect: "ts" }));
+registerLanguage(["rs", "rust"], rust);
 
 const $ = <T extends Element>(selector: string) => document.querySelector<T>(selector)!;
 
