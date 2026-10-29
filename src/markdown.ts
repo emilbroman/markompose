@@ -11,7 +11,8 @@ export type Span =
   | ListSpan
   | ListItemSpan
   | ListMarkerSpan
-  | CodeBlockSpan;
+  | CodeBlockSpan
+  | ThematicBreakSpan;
 
 interface SpanBase {
   start: number;
@@ -89,6 +90,11 @@ export interface CodeBlockSpan extends SpanBase {
   info: string;
 }
 
+/** A thematic break, like `---`, `***` or `___`; all of it is syntax. */
+export interface ThematicBreakSpan extends SpanBase {
+  type: "thematic-break";
+}
+
 /** An ATX heading. It ends at the end of its line, before the newline. */
 export interface HeadingSpan extends SpanBase {
   type: "heading";
@@ -125,7 +131,7 @@ const QUOTE_MARKER = /^ {0,3}> ?/;
 const FENCE = /^ {0,3}(`{3,}|~{3,})(.*)$/;
 // https://spec.commonmark.org/0.31.2/#list-items
 const LIST_MARKER = /^( {0,3})(?:[-+*]|(\d{1,9})([.)]))(?: +|$)/;
-// Not lists, but not supported yet either: https://spec.commonmark.org/0.31.2/#thematic-breaks
+// https://spec.commonmark.org/0.31.2/#thematic-breaks
 const THEMATIC_BREAK = /^ {0,3}([-*_])(?:[ \t]*\1){2,}[ \t]*$/;
 
 /** A line of source; `content` is where it starts inside its containers. */
@@ -188,6 +194,16 @@ function parseBlocks(source: string, lines: Line[], spans: Span[]): void {
         info: info.trim(),
       });
       i = j + 1;
+      continue;
+    }
+
+    // Setext headings aren't supported, so `---` under a paragraph line is a
+    // break too.
+    if (THEMATIC_BREAK.test(text)) {
+      endParagraph();
+      const open = line.end - line.content;
+      spans.push({ type: "thematic-break", start: line.content, end: line.end, open, close: 0 });
+      i++;
       continue;
     }
 

@@ -43,6 +43,8 @@ function tagFor(span: Span): string {
       return "span";
     case "code-block":
       return "pre";
+    case "thematic-break":
+      return "div";
   }
 }
 
@@ -58,7 +60,8 @@ function isBlock(span: Span): boolean {
     span.type === "blockquote" ||
     span.type === "list" ||
     span.type === "list-item" ||
-    span.type === "code-block"
+    span.type === "code-block" ||
+    span.type === "thematic-break"
   );
 }
 
@@ -350,6 +353,28 @@ const STYLES = `
 .md-tok-labelName, .md-tok-variableName2, .md-tok-deleted, .md-tok-invalid { color: var(--md-tok-special, light-dark(#e45649, #e06c75)); }
 .md-tok-comment, .md-tok-meta { color: var(--md-tok-comment, GrayText); }
 .md-tok-comment { font-style: italic; }
+/*
+ * A thematic break is a line of syntax with a rule drawn across it. Like code
+ * fences, the syntax hides by turning transparent, so the line keeps its
+ * height and the caret can go into it.
+ */
+.md-thematic-break {
+  position: relative;
+}
+.md-span.md-thematic-break:not(.active) > .md-syntax {
+  display: inline;
+  color: transparent;
+}
+.md-thematic-break:not(.active)::after {
+  content: "";
+  position: absolute;
+  inset-inline: 0;
+  top: 50%;
+  height: 1px;
+  translate: 0 -50%;
+  background: #8888;
+  pointer-events: none;
+}
 .md-code-block > .md-line-prefix,
 .md-heading > .md-line-prefix {
   font-family: var(--md-font-family);
