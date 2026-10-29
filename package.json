@@ -2,6 +2,14 @@
   "name": "markompose",
   "version": "0.0.0",
   "description": "A Markdown composer element that renders WYSIWYG while editing plain Markdown source.",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/emilbroman/markompose.git"
+  },
+  "publishConfig": {
+    "access": "public",
+    "registry": "https://registry.npmjs.org/"
+  },
   "type": "module",
   "files": [
     "dist"
@@ -23,7 +31,11 @@
     "dev": "vite",
     "build": "rm -rf dist && tsc -p tsconfig.build.json && vite build",
     "typecheck": "tsc --noEmit",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "changeset": "changeset",
+    "version:packages": "changeset version && npm install --package-lock-only --ignore-scripts",
+    "prepack": "npm run build",
+    "release": "changeset publish"
   },
   "peerDependencies": {
     "@lezer/common": "^1.5.4",
@@ -38,6 +50,7 @@
     }
   },
   "devDependencies": {
+    "@changesets/cli": "^3.0.3",
     "@lezer/common": "^1.5.4",
     "@lezer/highlight": "^1.2.5",
     "@lezer/javascript": "^1.5.6",
