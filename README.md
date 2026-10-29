@@ -52,9 +52,14 @@ Releases are managed by [Changesets](https://changesets.dev) and GitHub Actions.
 
 ### One-time setup
 
-1. Create an npm **granular access token** with **Read and write** package permissions and **Bypass 2FA** enabled for non-interactive publishing. The token must be allowed to publish `markompose`; for the initial release, it must also allow creating this new package. Use a short expiration and rotate the token before it expires.
-2. Add the token as a repository Actions secret named **`NPM_TOKEN`** under [Settings → Secrets and variables → Actions](https://github.com/emilbroman/markompose/settings/secrets/actions). Do not commit it to the repository. The workflow passes this secret to npm as `NODE_AUTH_TOKEN`.
-3. Under [Settings → Actions → General → Workflow permissions](https://github.com/emilbroman/markompose/settings/actions), enable **Allow GitHub Actions to create and approve pull requests**. The workflow requests its own `contents: write` and `pull-requests: write` permissions and uses GitHub's built-in token; no extra GitHub token secret is needed.
+1. In the npm package settings for `markompose`, configure a [trusted publisher](https://docs.npmjs.com/trusted-publishers/) for **GitHub Actions** with these exact values:
+   - Organization or user: **`emilbroman`**
+   - Repository: **`markompose`**
+   - Workflow filename: **`release.yml`** (not the full `.github/workflows/` path)
+   - Environment name: **leave blank** (the release job does not use a GitHub environment)
+   - Allowed actions: enable **`npm publish`**. Changesets publishes directly; a stage-only trusted publisher is not sufficient.
+2. No **`NPM_TOKEN`** or **`NODE_AUTH_TOKEN`** secret is needed or used. The workflow runs on a GitHub-hosted runner with Node 26 (including npm with trusted-publishing support), requests `id-token: write`, and lets npm authenticate via OIDC. Release builds do not restore dependency caches or configure token-based npm authentication. After confirming a successful OIDC publish, revoke any old npm automation token and delete its unused Actions secret.
+3. Under [Settings → Actions → General → Workflow permissions](https://github.com/emilbroman/markompose/settings/actions), enable **Allow GitHub Actions to create and approve pull requests**. If the repository option is disabled, an organization owner must first allow it in the [organization's Actions settings](https://github.com/organizations/emilbroman/settings/actions). The workflow requests its own `contents: write` and `pull-requests: write` permissions and uses GitHub's built-in token; no extra GitHub token secret is needed. This GitHub PR permission is separate from npm's OIDC authentication.
 
 ### Release flow
 
@@ -62,4 +67,4 @@ Releases are managed by [Changesets](https://changesets.dev) and GitHub Actions.
 2. Push or merge to `main`. The **Release** workflow opens or updates a **chore: release** pull request with the new version, changelog, and synchronized npm lockfile.
 3. Review and merge that release PR when ready to publish. The next Release run publishes the new version publicly to npm with provenance, pushes a version tag, and creates a GitHub release. The `prepack` hook always rebuilds JavaScript and TypeScript declarations before packaging or publishing.
 
-The initial changeset queues **`markompose@0.1.0`**. Configure the secret before merging its release PR. To retry a failed release after fixing credentials or settings, rerun the failed job or manually run **Release** from the Actions tab on `main`.
+The initial changeset queues **`markompose@0.1.0`**. Verify the npm trusted-publisher configuration before merging its release PR. To retry a failed release after fixing npm or GitHub settings, rerun the failed job or manually run **Release** from the Actions tab on `main`.
