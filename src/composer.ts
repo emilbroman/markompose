@@ -1,4 +1,5 @@
 import { highlighterFor, registerHighlighter, type Highlighter } from "./highlight";
+import { History } from "./history";
 import {
   parse,
   type CodeBlockSpan,
@@ -208,6 +209,9 @@ function graphemeAfter(text: string, offset: number): number {
   const [first] = graphemes.segment(text.slice(offset, offset + 32));
   return offset + (first?.segment.length ?? 0);
 }
+
+/** Whether shortcuts use Cmd rather than Ctrl. */
+const IS_MAC = /Mac|iPhone|iPad/.test(navigator.platform);
 
 /** Marks the `<br>` that keeps a trailing newline visible; it is not source. */
 const SENTINEL = "data-sentinel";
@@ -454,6 +458,7 @@ export class Composer extends HTMLElement {
   /** Where the last collapsed selection was, and where it snapped to. */
   #anchorSnap: [number, number] | null = null;
   #pointerDown = false;
+  readonly #history = new History();
 
   constructor() {
     super();
@@ -473,6 +478,7 @@ export class Composer extends HTMLElement {
     root.append(style, this.#quoteMeasure, this.#editor);
 
     this.#editor.addEventListener("beforeinput", this.#onBeforeInput);
+    this.#editor.addEventListener("keydown", this.#onKeyDown);
     this.#editor.addEventListener("copy", this.#onCopy);
     this.#editor.addEventListener("cut", this.#onCopy);
     this.#editor.addEventListener("input", this.#onInput);
@@ -645,6 +651,11 @@ export class Composer extends HTMLElement {
    * browser and is reconciled in #onInput.
    */
   #onBeforeInput = (event: InputEvent): void => {
+    // From the Edit menu, say. Our edits aren't in the browser's history.
+    if (event.inputType === "historyUndo" || event.inputType === "historyRedo") {
+      event.preventDefault();
+      return event.inputType === "historyUndo" ? this.#undo() : this.#redo();
+    }
     const edit = this.#editFor(event);
     if (!edit) return;
     event.preventDefault();
@@ -652,16 +663,67 @@ export class Composer extends HTMLElement {
     this.#edit(...edit, new InputEvent("input", { bubbles: true, composed: true, inputType: event.inputType, data: event.data }));
   };
 
-  /** Replaces source[start, end) with text, re-renders, and announces it. */
+  /**
+   * Replaces source[start, end) with text, re-renders, and announces it.
+   * Undoable.
+   */
   #edit(start: number, end: number, text: string, event: InputEvent): void {
+    const caret = start + text.length;
+    this.#history.record({
+      start,
+      removed: this.#value.slice(start, end),
+      inserted: text,
+      before: this.#getSelection() ?? [start, end],
+      after: [caret, caret],
+      kind: event.inputType,
+      time: event.timeStamp,
+    });
+    this.#replace(start, end, text, [caret, caret], event);
+  }
+
+  /** Replaces source[start, end) with text, selects `selection`, and announces it. */
+  #replace(start: number, end: number, text: string, selection: [number, number], event: InputEvent): void {
     this.#dirty = true;
     this.#value = this.#value.slice(0, start) + text + this.#value.slice(end);
     this.#internals.setFormValue(this.#value);
-    const caret = start + text.length;
-    this.#render([caret, caret]);
-    this.setSelectionRange(caret, caret);
+    this.#render(selection);
+    this.setSelectionRange(...selection);
     this.dispatchEvent(event);
   }
+
+  #undo(): void {
+    const change = this.#history.undo();
+    if (!change) return;
+    const { start, inserted, removed, before } = change;
+    this.#replace(start, start + inserted.length, removed, before, this.#historyEvent("historyUndo"));
+  }
+
+  #redo(): void {
+    const change = this.#history.redo();
+    if (!change) return;
+    const { start, inserted, removed, after } = change;
+    this.#replace(start, start + removed.length, inserted, after, this.#historyEvent("historyRedo"));
+  }
+
+  #historyEvent(inputType: "historyUndo" | "historyRedo"): InputEvent {
+    return new InputEvent("input", { bubbles: true, composed: true, inputType });
+  }
+
+  /**
+   * Undo and redo. The browser would undo its own history, which our edits
+   * aren't in, so it isn't asked.
+   */
+  #onKeyDown = (event: KeyboardEvent): void => {
+    if (event.isComposing || !this.#isEditable() || event.altKey) return;
+    if (!(IS_MAC ? event.metaKey && !event.ctrlKey : event.ctrlKey && !event.metaKey)) return;
+    const key = event.key.toLowerCase();
+    const undo = key === "z" && !event.shiftKey;
+    const redo = (key === "z" && event.shiftKey) || (!IS_MAC && key === "y" && !event.shiftKey);
+    if (!undo && !redo) return;
+    event.preventDefault();
+    if (undo) this.#undo();
+    else this.#redo();
+  };
 
   /**
    * Copies the selected source. The browser would copy the rendered text,
@@ -751,8 +813,10 @@ export class Composer extends HTMLElement {
     if ((event as InputEvent).isComposing) return;
     this.#dirty = true;
     const selection = this.#getSelection();
+    const previous = this.#value;
     this.#value = this.#serialize();
     this.#internals.setFormValue(this.#value);
+    this.#recordDiff(previous, this.#value, selection, event);
     // The browser has edited the rendered DOM; rebuild it from the source and
     // put the selection back at the same source offsets.
     this.#render(selection);
@@ -760,6 +824,28 @@ export class Composer extends HTMLElement {
     // The native input event is composed, so it already reaches listeners on
     // the host; no need to re-dispatch.
   };
+
+  /** Records the browser's own edit, as the change between two values. */
+  #recordDiff(previous: string, next: string, selection: [number, number] | null, event: Event): void {
+    if (previous === next) return;
+    let start = 0;
+    while (start < previous.length && start < next.length && previous[start] === next[start]) start++;
+    let end = 0;
+    const room = Math.min(previous.length, next.length) - start;
+    while (end < room && previous.at(-1 - end) === next.at(-1 - end)) end++;
+    const removed = previous.slice(start, previous.length - end);
+    const inserted = next.slice(start, next.length - end);
+    const caret = start + inserted.length;
+    this.#history.record({
+      start,
+      removed,
+      inserted,
+      before: [start, start + removed.length],
+      after: selection ?? [caret, caret],
+      kind: (event as InputEvent).inputType ?? event.type,
+      time: event.timeStamp,
+    });
+  }
 
   #onSelectionChange = (): void => {
     // A disabled or read-only editor can't take focus, but its text can still
@@ -910,6 +996,8 @@ export class Composer extends HTMLElement {
   }
 
   #setValue(value: string): void {
+    // Like a textarea's, setting the value clears the undo history.
+    this.#history.clear();
     this.#value = value;
     this.#render(null);
     this.#internals.setFormValue(value);
