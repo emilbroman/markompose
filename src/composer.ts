@@ -24,6 +24,8 @@ function tagFor(span: Span): string {
       return "li";
     case "list-marker":
       return "span";
+    case "code-block":
+      return "pre";
   }
 }
 
@@ -34,7 +36,13 @@ function isLinePrefix(span: Span): span is QuoteMarkerSpan | ListMarkerSpan {
 
 /** Block-level spans keep the newline that ends them inside their element. */
 function isBlock(span: Span): boolean {
-  return span.type === "heading" || span.type === "blockquote" || span.type === "list" || span.type === "list-item";
+  return (
+    span.type === "heading" ||
+    span.type === "blockquote" ||
+    span.type === "list" ||
+    span.type === "list-item" ||
+    span.type === "code-block"
+  );
 }
 
 /**
@@ -249,7 +257,28 @@ const STYLES = `
 .md-list-item {
   padding-left: var(--md-gutter, 1.5em);
 }
+/*
+ * Code blocks look like inline code. Their fence lines hide by turning
+ * transparent rather than going, so the block keeps its height. Not with
+ * visibility, which the caret can't go into: arrow keys would skip the block.
+ * The margin gives the background room to the left without moving the text.
+ */
+.md-code-block {
+  margin: 0 -0.4em;
+  padding: 0 0.4em;
+  font-family: ui-monospace, monospace;
+  font-size: 0.9em;
+  background: #8882;
+  border-radius: 3px;
+}
+/* More specific than the rule that hides other syntax. */
+.md-span.md-code-block:not(.active) > .md-syntax {
+  display: inline;
+  color: transparent;
+}
+.md-code-block > .md-line-prefix,
 .md-heading > .md-line-prefix {
+  font-family: var(--md-font-family);
   font-size: var(--md-font-size);
   font-weight: var(--md-font-weight);
 }
@@ -729,6 +758,8 @@ export class Composer extends HTMLElement {
    */
   #snapCaret(caret: number): number {
     return this.#snap(caret, (span, caret) => {
+      // A code block's fences are lines of their own, not beside its text.
+      if (span.type === "code-block") return caret;
       if (!isLineSyntax(span)) return outside(span, caret);
       return caret === span.start ? span.start + span.open : caret;
     });
@@ -811,9 +842,11 @@ export class Composer extends HTMLElement {
     const space = this.#markerWidth(" ");
     if (indent === 0) return; // Not rendered yet.
 
-    const { fontSize, fontWeight } = getComputedStyle(this.#quoteMeasure);
+    const { fontFamily, fontSize, fontWeight } = getComputedStyle(this.#quoteMeasure);
     this.#editor.style.setProperty("--md-quote-indent", `${indent}px`);
-    // Line prefixes inside headings use the base font, to match the gutters.
+    // Line prefixes inside headings and code use the base font, to match the
+    // gutters.
+    this.#editor.style.setProperty("--md-font-family", fontFamily);
     this.#editor.style.setProperty("--md-font-size", fontSize);
     this.#editor.style.setProperty("--md-font-weight", fontWeight);
 

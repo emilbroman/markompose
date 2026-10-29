@@ -10,7 +10,8 @@ export type Span =
   | QuoteMarkerSpan
   | ListSpan
   | ListItemSpan
-  | ListMarkerSpan;
+  | ListMarkerSpan
+  | CodeBlockSpan;
 
 interface SpanBase {
   start: number;
@@ -77,6 +78,17 @@ export interface ListMarkerSpan extends SpanBase {
   sigil?: number;
 }
 
+/**
+ * A fenced code block. Its tokens are its whole opening and closing fence
+ * lines, like ```` ```js ```` and ```` ``` ````; it has no closing token if
+ * it runs to the end of its container unclosed.
+ */
+export interface CodeBlockSpan extends SpanBase {
+  type: "code-block";
+  /** The info string after the opening fence, like a language. */
+  info: string;
+}
+
 /** An ATX heading. It ends at the end of its line, before the newline. */
 export interface HeadingSpan extends SpanBase {
   type: "heading";
@@ -109,6 +121,8 @@ const BLANK_LINE = /^[ \t]*$/;
 
 // https://spec.commonmark.org/0.31.2/#block-quotes
 const QUOTE_MARKER = /^ {0,3}> ?/;
+// https://spec.commonmark.org/0.31.2/#fenced-code-blocks
+const FENCE = /^ {0,3}(`{3,}|~{3,})(.*)$/;
 // https://spec.commonmark.org/0.31.2/#list-items
 const LIST_MARKER = /^( {0,3})(?:[-+*]|(\d{1,9})([.)]))(?: +|$)/;
 // Not lists, but not supported yet either: https://spec.commonmark.org/0.31.2/#thematic-breaks
@@ -153,6 +167,29 @@ function parseBlocks(source: string, lines: Line[], spans: Span[]): void {
   for (let i = 0; i < lines.length; ) {
     const line = lines[i]!;
     const text = source.slice(line.content, line.end);
+
+    const fence = FENCE.exec(text);
+    // A backtick fence's info string can't hold backticks; that's inline code.
+    if (fence && !(fence[1]!.startsWith("`") && fence[2]!.includes("`"))) {
+      endParagraph();
+      const [, run, info] = fence as unknown as [string, string, string];
+      const closing = new RegExp(`^ {0,3}${run[0] === "`" ? "`" : "~"}{${run.length},}[ \\t]*$`);
+      let j = i + 1;
+      while (j < lines.length && !closing.test(source.slice(lines[j]!.content, lines[j]!.end))) j++;
+      // Unclosed, the block runs to the end of its container.
+      const last = lines[Math.min(j, lines.length - 1)]!;
+      const closed = j < lines.length;
+      spans.push({
+        type: "code-block",
+        start: line.content,
+        end: last.end,
+        open: line.end - line.content,
+        close: closed ? last.end - last.content : 0,
+        info: info.trim(),
+      });
+      i = j + 1;
+      continue;
+    }
 
     if (QUOTE_MARKER.test(text)) {
       endParagraph();
