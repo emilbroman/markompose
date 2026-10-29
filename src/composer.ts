@@ -704,21 +704,27 @@ export class Composer extends HTMLElement {
 
   /**
    * Wraps a non-empty selection in `open` and `close`, keeping the same text
-   * selected inside. For formatting, whitespace at the selection's ends stays
-   * outside, since emphasis can't start or end with it. Returns whether it did.
+   * selected inside. Formatting toggles: if the selection is already wrapped,
+   * it's unwrapped instead. Whitespace at the selection's ends stays outside,
+   * since emphasis can't start or end with it. Returns whether it did either.
    */
-  #wrapSelection(open: string, close: string, inputType: string, trim: boolean): boolean {
+  #wrapSelection(open: string, close: string, inputType: string, format: boolean): boolean {
     const selection = this.#getSelection();
     if (!selection || selection[0] === selection[1]) return false;
     let [start, end] = selection;
-    if (trim) {
+    const event = new InputEvent("input", { bubbles: true, composed: true, inputType, data: format ? null : open });
+    if (format) {
       const text = this.#value.slice(start, end);
       if (text.trim() === "") return false;
       start += text.length - text.trimStart().length;
       end -= text.length - text.trimEnd().length;
+      const outer: [number, number] = [start - open.length, end + close.length];
+      if (outer[0] >= 0 && this.#value.slice(outer[0], start) === open && this.#value.slice(end, outer[1]) === close) {
+        this.#edit(...outer, this.#value.slice(start, end), event, [outer[0], end - open.length], "wrap");
+        return true;
+      }
     }
     const text = open + this.#value.slice(start, end) + close;
-    const event = new InputEvent("input", { bubbles: true, composed: true, inputType, data: inputType === "insertText" ? open : null });
     // Its own kind, so that it's undone on its own, not with typing.
     this.#edit(start, end, text, event, [start + open.length, end + open.length], "wrap");
     return true;
