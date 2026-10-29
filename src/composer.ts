@@ -439,7 +439,7 @@ const STYLES = `
 export class Composer extends HTMLElement {
   static readonly tagName = "markompose-composer";
   static readonly formAssociated = true;
-  static readonly observedAttributes = ["placeholder", "disabled", "readonly"];
+  static readonly observedAttributes = ["placeholder", "disabled", "readonly", "aria-label"];
 
   /** Connected composers, to re-render when languages are registered. */
   static readonly #connected = new Set<Composer>();
@@ -499,7 +499,11 @@ export class Composer extends HTMLElement {
     this.#editor.addEventListener("pointerdown", this.#onPointerDown);
     this.#editor.addEventListener("click", this.#onClick);
     this.#editor.addEventListener("pointermove", this.#onModifierChange);
-    this.#editor.addEventListener("focus", () => (this.#valueAtFocus = this.#value));
+    this.#editor.addEventListener("focus", () => {
+      this.#valueAtFocus = this.#value;
+      // Labels can come and go after connection; catch up before they're read.
+      this.#syncLabel();
+    });
     this.#editor.addEventListener("blur", () => {
       this.#updateActive(null);
       if (this.#value !== this.#valueAtFocus) {
@@ -511,6 +515,7 @@ export class Composer extends HTMLElement {
   connectedCallback(): void {
     if (!this.#dirty) this.#setValue(this.defaultValue);
     this.#syncEditable();
+    this.#syncLabel();
     // Rendering before connection, or before web fonts load, measures wrong.
     this.#layoutPrefixes();
     document.fonts.ready.then(() => {
@@ -538,6 +543,10 @@ export class Composer extends HTMLElement {
     switch (name) {
       case "placeholder":
         this.#editor.dataset.placeholder = next ?? "";
+        this.#editor.ariaPlaceholder = next;
+        break;
+      case "aria-label":
+        this.#syncLabel();
         break;
       case "disabled":
       case "readonly":
@@ -1067,6 +1076,21 @@ export class Composer extends HTMLElement {
     const selection = this.#getSelection();
     this.#render(selection);
     if (selection) this.setSelectionRange(...selection);
+  }
+
+  /**
+   * Names the textbox. It's in the shadow root, so neither an `aria-label` on
+   * the element nor a `<label>` for it reaches it by itself. The former is
+   * copied over; the latter is referenced, since an element in a shadow root
+   * may point at elements outside it (though not the other way round).
+   */
+  #syncLabel(): void {
+    const label = this.getAttribute("aria-label");
+    this.#editor.ariaLabel = label;
+    if ("ariaLabelledByElements" in this.#editor) {
+      const labels = label === null ? [...this.#internals.labels] : [];
+      this.#editor.ariaLabelledByElements = labels.length > 0 ? (labels as Element[]) : null;
+    }
   }
 
   #syncEditable(): void {
