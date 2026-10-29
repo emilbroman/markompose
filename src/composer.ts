@@ -210,6 +210,19 @@ function graphemeAfter(text: string, offset: number): number {
   return offset + (first?.segment.length ?? 0);
 }
 
+/** Characters that, typed over a selection, wrap it, with what closes them. */
+const WRAPPING: Record<string, string> = {
+  "*": "*",
+  _: "_",
+  "~": "~",
+  '"': '"',
+  "'": "'",
+  "(": ")",
+  "[": "]",
+  "<": ">",
+  "{": "}",
+};
+
 /** Whether shortcuts use Cmd rather than Ctrl. */
 const IS_MAC = /Mac|iPhone|iPad/.test(navigator.platform);
 
@@ -656,6 +669,8 @@ export class Composer extends HTMLElement {
       event.preventDefault();
       return event.inputType === "historyUndo" ? this.#undo() : this.#redo();
     }
+    const wrap = event.inputType === "insertText" && event.data !== null ? WRAPPING[event.data] : undefined;
+    if (wrap !== undefined && this.#wrapSelection(event.data!, wrap, event.inputType, false)) return event.preventDefault();
     const edit = this.#editFor(event);
     if (!edit) return;
     event.preventDefault();
@@ -667,18 +682,46 @@ export class Composer extends HTMLElement {
    * Replaces source[start, end) with text, re-renders, and announces it.
    * Undoable.
    */
-  #edit(start: number, end: number, text: string, event: InputEvent): void {
-    const caret = start + text.length;
+  #edit(
+    start: number,
+    end: number,
+    text: string,
+    event: InputEvent,
+    selection: [number, number] = [start + text.length, start + text.length],
+    kind = event.inputType,
+  ): void {
     this.#history.record({
       start,
       removed: this.#value.slice(start, end),
       inserted: text,
       before: this.#getSelection() ?? [start, end],
-      after: [caret, caret],
-      kind: event.inputType,
+      after: selection,
+      kind,
       time: event.timeStamp,
     });
-    this.#replace(start, end, text, [caret, caret], event);
+    this.#replace(start, end, text, selection, event);
+  }
+
+  /**
+   * Wraps a non-empty selection in `open` and `close`, keeping the same text
+   * selected inside. For formatting, whitespace at the selection's ends stays
+   * outside, since emphasis can't start or end with it. Returns whether it did.
+   */
+  #wrapSelection(open: string, close: string, inputType: string, trim: boolean): boolean {
+    const selection = this.#getSelection();
+    if (!selection || selection[0] === selection[1]) return false;
+    let [start, end] = selection;
+    if (trim) {
+      const text = this.#value.slice(start, end);
+      if (text.trim() === "") return false;
+      start += text.length - text.trimStart().length;
+      end -= text.length - text.trimEnd().length;
+    }
+    const text = open + this.#value.slice(start, end) + close;
+    const event = new InputEvent("input", { bubbles: true, composed: true, inputType, data: inputType === "insertText" ? open : null });
+    // Its own kind, so that it's undone on its own, not with typing.
+    this.#edit(start, end, text, event, [start + open.length, end + open.length], "wrap");
+    return true;
   }
 
   /** Replaces source[start, end) with text, selects `selection`, and announces it. */
@@ -710,8 +753,8 @@ export class Composer extends HTMLElement {
   }
 
   /**
-   * Undo and redo. The browser would undo its own history, which our edits
-   * aren't in, so it isn't asked.
+   * Keyboard shortcuts: undo and redo, and formatting. The browser would undo
+   * its own history, which our edits aren't in, so it isn't asked.
    */
   #onKeyDown = (event: KeyboardEvent): void => {
     if (event.isComposing || !this.#isEditable() || event.altKey) return;
@@ -719,10 +762,20 @@ export class Composer extends HTMLElement {
     const key = event.key.toLowerCase();
     const undo = key === "z" && !event.shiftKey;
     const redo = (key === "z" && event.shiftKey) || (!IS_MAC && key === "y" && !event.shiftKey);
-    if (!undo && !redo) return;
-    event.preventDefault();
-    if (undo) this.#undo();
-    else this.#redo();
+    if (undo || redo) {
+      event.preventDefault();
+      return undo ? this.#undo() : this.#redo();
+    }
+    // Formatting a selection.
+    const format =
+      key === "b" && !event.shiftKey
+        ? (["**", "formatBold"] as const)
+        : key === "i" && !event.shiftKey
+          ? (["_", "formatItalic"] as const)
+          : key === "x" && event.shiftKey
+            ? (["~", "formatStrikeThrough"] as const)
+            : null;
+    if (format && this.#wrapSelection(format[0], format[0], format[1], true)) event.preventDefault();
   };
 
   /**
